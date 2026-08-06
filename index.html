@@ -1,0 +1,2539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FleetGuard PMS — Maritime Planned Maintenance System</title>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- ============================================================
+     FIREBASE (Cloud Firestore) — v10 Modular SDK
+     ============================================================
+     This module:
+       1. Initializes the Firebase App + Firestore database.
+       2. Opens real-time onSnapshot() listeners on the four
+          FleetGuard collections (vessels, tasks, logs, reports).
+       3. Exposes a small CRUD façade on window.FGDB so the main
+          (classic, non-module) application script below — which
+          is what all the onclick="" handlers in this HTML call —
+          can create/update/delete documents without itself having
+          to deal with ES module imports.
+       4. Exposes window.onVesselsSnapshot / onTasksSnapshot /
+          onLogsSnapshot / onReportsSnapshot as the "wires" the
+          app script implements to receive live data pushes.
+
+     NOTE: Because this is a type="module" script, it always runs
+     AFTER the page has finished parsing (deferred), which is also
+     after the classic app <script> at the bottom of <body> has
+     executed and defined all of window.onVesselsSnapshot etc. So
+     by the time any onSnapshot() callback fires here, the handlers
+     it calls already exist. No race condition, no build step.
+============================================================= -->
+<script type="module">
+  import {
+    initializeApp
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getFirestore, collection, doc, addDoc, updateDoc, deleteDoc,
+    onSnapshot, query, orderBy, writeBatch, getDocs
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  // ── 1. FIREBASE CONFIGURATION ─────────────────────────────────
+  // Replace with the config object from:
+  // Firebase Console → Project Settings → General → "Your apps" → SDK setup and configuration
+  const firebaseConfig = {
+    apiKey:            "AIzaSyBwo8krwWII_HQv_wxQBmdCIRN-nrd_1jE",
+    authDomain:        "fleetguard-pms.firebaseapp.com",
+    projectId:         "fleetguard-pms",
+    storageBucket:      "fleetguard-pms.firebasestorage.app",
+    messagingSenderId: "685922016706",
+    appId:             "1:685922016706:web:d6fb7bb3296683203fca5b"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
+  // ── 2. COLLECTION REFERENCES ──────────────────────────────────
+  // vessels  → one document per ship in the fleet
+  // tasks    → one document per PMS maintenance task (close-out
+  //            history is stored as an embedded array field on the
+  //            task document, since it is always read/written
+  //            together with its parent task)
+  // logs     → flat, fleet-wide feed of every close-out / defect
+  //            entry ever recorded (used for "Defect Logs")
+  // reports  → metadata record of every printed/generated report
+  //            (used for "Fleet Reports")
+  const vesselsCol = collection(db, "vessels");
+  const tasksCol   = collection(db, "tasks");
+  const logsCol    = collection(db, "logs");
+  const reportsCol = collection(db, "reports");
+
+  // ── 3. REAL-TIME LISTENERS ────────────────────────────────────
+  // Each listener fires immediately with the current cached/local
+  // state, then again in real time whenever any connected client
+  // (this tab, a colleague's laptop, a phone onboard the vessel...)
+  // writes to that collection. This is what makes the app
+  // multi-user / cloud-connected instead of localStorage-only.
+  onSnapshot(vesselsCol, snap => {
+    window.onVesselsSnapshot(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  }, err => {
+    console.error("FleetGuard: vessels listener error", err);
+    window.showToast?.("Lost connection to vessels data.", "error");
+  });
+
+  onSnapshot(tasksCol, snap => {
+    window.onTasksSnapshot(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  }, err => {
+    console.error("FleetGuard: tasks listener error", err);
+    window.showToast?.("Lost connection to tasks data.", "error");
+  });
+
+  onSnapshot(query(logsCol, orderBy("loggedAt", "desc")), snap => {
+    window.onLogsSnapshot(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  }, err => {
+    console.error("FleetGuard: logs listener error", err);
+  });
+
+  onSnapshot(reportsCol, snap => {
+    window.onReportsSnapshot(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  }, err => {
+    console.error("FleetGuard: reports listener error", err);
+  });
+
+  // ── 4. CRUD FAÇADE ─────────────────────────────────────────────
+  // The classic app script (bottom of <body>) calls these instead
+  // of mutating a local array + localStorage.setItem(). Every call
+  // returns a Promise so the app script can await it and show a
+  // toast on success/failure.
+  window.FGDB = {
+    // Vessels
+    addVessel:    (data)      => addDoc(vesselsCol, data),
+    updateVessel: (id, data)  => updateDoc(doc(db, "vessels", id), data),
+    deleteVessel: (id)        => deleteDoc(doc(db, "vessels", id)),
+    vesselRef:    (id)        => doc(db, "vessels", id),
+
+    // Maintenance tasks
+    addTask:      (data)      => addDoc(tasksCol, data),
+    updateTask:   (id, data)  => updateDoc(doc(db, "tasks", id), data),
+    deleteTask:   (id)        => deleteDoc(doc(db, "tasks", id)),
+    taskRef:      (id)        => doc(db, "tasks", id),
+    newTaskRef:   ()          => doc(tasksCol), // pre-generated ID, for batched writes
+
+    // Defect / close-out logs
+    addLog:       (data)      => addDoc(logsCol, data),
+    logRef:       (id)        => doc(db, "logs", id),
+
+    // Fleet reports (print/export audit trail)
+    addReport:    (data)      => addDoc(reportsCol, data),
+
+    // Batched writes (multi-document atomic operations — used for
+    // vessel deletion cascades and the "Copy PMS" bulk-copy tool)
+    newBatch:     ()          => writeBatch(db),
+
+    // Full collection wipe + reseed, used by the "Reset to seed
+    // data" toolbar button
+    wipeAndReseed: async (seed) => {
+      // Delete every existing document in vessels/tasks/logs
+      for (const col of [vesselsCol, tasksCol, logsCol]) {
+        const snap = await getDocs(col);
+        if (snap.empty) continue;
+        const batch = writeBatch(db);
+        snap.docs.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+      }
+      // Re-insert vessels, remembering old seed-id → new Firestore-id
+      const vesselIdMap = {};
+      const vesselBatch = writeBatch(db);
+      seed.vessels.forEach(v => {
+        const { id: seedId, ...data } = v;
+        const ref = doc(vesselsCol);
+        vesselIdMap[seedId] = ref.id;
+        vesselBatch.set(ref, data);
+      });
+      await vesselBatch.commit();
+      // Re-insert tasks pointed at the *new* vessel ids
+      const taskBatch = writeBatch(db);
+      seed.tasks.forEach(t => {
+        const { id: seedId, ...data } = t;
+        data.vesselId = vesselIdMap[data.vesselId] || data.vesselId;
+        taskBatch.set(doc(tasksCol), data);
+      });
+      await taskBatch.commit();
+    }
+  };
+
+  window.dispatchEvent(new CustomEvent("fleetguard:db-ready"));
+</script>
+<!-- ============================================================ -->
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  * { font-family: 'Inter', sans-serif; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #f1f5f9; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+  .header-gradient {
+    background: #ffffff;
+    border-bottom: 1px solid #e2e8f0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+
+  .nav-pill { transition: all 0.18s ease; }
+  .nav-pill.active {
+    background: #eff6ff;
+    border-color: #bfdbfe !important;
+    color: #1d4ed8 !important;
+    font-weight: 600;
+  }
+  .nav-pill:hover:not(.active) { background: #f8fafc; }
+
+  .status-red    { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+  .status-yellow { background: #fefce8; color: #ca8a04; border: 1px solid #fde68a; }
+  .status-green  { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+
+  .task-row {
+    transition: background 0.12s ease;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  .task-row:hover { background: #f8fafc !important; cursor: pointer; }
+  .task-row.overdue    { border-left: 3px solid #ef4444; }
+  .task-row.coming-due { border-left: 3px solid #eab308; }
+  .task-row.compliant  { border-left: 3px solid #22c55e; }
+
+  .modal-overlay { background: rgba(15,23,42,0.5); backdrop-filter: blur(3px); }
+
+  .stat-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s;
+  }
+  .stat-card:hover { border-color: #bfdbfe; box-shadow: 0 4px 12px rgba(59,130,246,0.08); transform: translateY(-1px); }
+
+  .vessel-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    transition: all 0.18s ease;
+    cursor: pointer;
+  }
+  .vessel-card:hover { border-color: #93c5fd; box-shadow: 0 4px 12px rgba(59,130,246,0.1); }
+
+  .form-input {
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    color: #111827;
+    transition: border-color 0.18s, box-shadow 0.18s;
+  }
+  .form-input:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+  }
+  .form-input option { background: #ffffff; color: #111827; }
+  .form-input::placeholder { color: #9ca3af; }
+
+  @keyframes pulse-red { 0%,100%{opacity:1} 50%{opacity:0.5} }
+  .pulse-red { animation: pulse-red 2s ease-in-out infinite; }
+
+  .section { animation: fadeIn 0.22s ease; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:translateY(0)} }
+
+  .progress-bar { height: 4px; background: #f1f5f9; border-radius: 2px; overflow: hidden; }
+  .progress-fill { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+
+  .log-entry { background: #f8fafc; border-left: 3px solid #bfdbfe; }
+
+  .cat-safety        { background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; }
+  .cat-propulsion    { background:#faf5ff; color:#7e22ce; border:1px solid #e9d5ff; }
+  .cat-electrical    { background:#fefce8; color:#a16207; border:1px solid #fde68a; }
+  .cat-hull          { background:#f0fdfa; color:#0f766e; border:1px solid #99f6e4; }
+  .cat-navigation    { background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; }
+  .cat-environmental { background:#f0fdf4; color:#15803d; border:1px solid #bbf7d0; }
+  .cat-deck          { background:#fff7ed; color:#c2410c; border:1px solid #fed7aa; }
+  .cat-hotel         { background:#fdf4ff; color:#a21caf; border:1px solid #f0abfc; }
+
+  .copy-task-row { transition: background 0.12s; }
+  .copy-task-row:hover { background: #f0f9ff; }
+  .copy-task-row.selected { background: #eff6ff; }
+  .check-all-btn { transition: all 0.15s; }
+  .vessel-chip { transition: all 0.15s; border: 2px solid #e2e8f0; }
+  .vessel-chip.selected { border-color: #3b82f6; background: #eff6ff; color: #1d4ed8; }
+
+  /* Attendee tag pill */
+  .attendee-tag { background:#eff6ff; border:1px solid #bfdbfe; color:#1d4ed8; }
+  .attendee-tag:hover .remove-att { opacity:1; }
+  .remove-att { opacity:0; transition:opacity 0.15s; }
+
+  /* ── PRINT STYLES ───────────────────────────────────────── */
+  @media print {
+    body * { visibility: hidden !important; }
+    #print-area, #print-area * { visibility: visible !important; }
+    #print-area {
+      position: fixed !important; inset: 0 !important;
+      padding: 20mm 18mm !important;
+      background: #fff !important;
+      font-family: 'Inter', Arial, sans-serif !important;
+      font-size: 10pt !important;
+      color: #111 !important;
+    }
+    .print-page-break { page-break-before: always; }
+    .no-print { display: none !important; }
+    @page { margin: 0; size: A4 portrait; }
+  }
+
+  .category-group-header { background: #f8fafc; }
+
+  select.form-input, input.form-input { height: 34px; }
+  textarea.form-input { height: auto; }
+
+  .btn-primary   { background:#2563eb; color:#fff; transition:background 0.15s; }
+  .btn-primary:hover { background:#1d4ed8; }
+  .btn-secondary { background:#fff; color:#374151; border:1px solid #d1d5db; transition:all 0.15s; }
+  .btn-secondary:hover { background:#f9fafb; border-color:#9ca3af; }
+  .btn-danger    { background:#fff; color:#dc2626; border:1px solid #fecaca; transition:all 0.15s; }
+  .btn-danger:hover { background:#fef2f2; border-color:#f87171; }
+</style>
+</head>
+<body class="bg-slate-50 text-gray-800 min-h-screen">
+
+<!-- ===== HEADER ===== -->
+<header class="header-gradient sticky top-0 z-40">
+  <div class="max-w-screen-2xl mx-auto px-4 h-16 flex items-center justify-between gap-4">
+    <div class="flex items-center gap-3 shrink-0">
+      <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shadow-sm">
+        <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path d="M12 3L2 12h3v8h6v-5h2v5h6v-8h3L12 3z"/>
+        </svg>
+      </div>
+      <div>
+        <div class="text-sm font-bold text-gray-900 leading-tight">FleetGuard PMS</div>
+        <div class="text-xs text-gray-400 leading-tight mono">v2.4.1</div>
+      </div>
+    </div>
+
+    <nav class="flex items-center gap-1 overflow-x-auto">
+      <button id="nav-fleet" onclick="setView('fleet')"
+        class="nav-pill active flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-transparent text-xs font-medium text-gray-500 whitespace-nowrap">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+        </svg>
+        Fleet Dashboard
+      </button>
+      <div id="vessel-nav-container" class="flex items-center gap-1"></div>
+    </nav>
+
+    <div class="flex items-center gap-2 shrink-0">
+      <div id="current-date-display" class="hidden sm:block text-xs text-gray-400 mono bg-gray-50 border border-gray-200 px-2 py-1 rounded-md"></div>
+      <button onclick="openAddVesselModal()"
+        class="flex items-center gap-1.5 px-3 py-1.5 btn-secondary rounded-lg text-xs font-medium">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/>
+        </svg>
+        Add Vessel
+      </button>
+      <button onclick="openAddTaskModal()"
+        class="flex items-center gap-1.5 px-3 py-1.5 btn-primary rounded-lg text-xs font-medium shadow-sm">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/>
+        </svg>
+        Add Task
+      </button>
+      <button onclick="clearData()" title="Reset to seed data"
+        class="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:text-gray-600 hover:border-gray-300 transition-colors">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- ===== MAIN ===== -->
+<main class="max-w-screen-2xl mx-auto px-4 py-6">
+
+  <!-- FLEET VIEW -->
+  <div id="view-fleet" class="section">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+      <div>
+        <h1 class="text-xl font-bold text-gray-900">Port Captain Fleet Dashboard</h1>
+        <p class="text-sm text-gray-500 mt-0.5">Real-time compliance overview across all vessels</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <select id="fleet-filter-status" onchange="renderFleetView()" class="form-input text-xs px-3 rounded-lg">
+          <option value="all">All Statuses</option>
+          <option value="overdue">Overdue Only</option>
+          <option value="coming-due">Coming Due</option>
+          <option value="compliant">Compliant</option>
+        </select>
+        <select id="fleet-filter-vessel" onchange="renderFleetView()" class="form-input text-xs px-3 rounded-lg">
+          <option value="all">All Vessels</option>
+        </select>
+        <select id="fleet-filter-category" onchange="renderFleetView()" class="form-input text-xs px-3 rounded-lg">
+          <option value="all">All Categories</option>
+        </select>
+      </div>
+    </div>
+
+    <div id="fleet-kpi-strip" class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 mb-6"></div>
+    <div id="vessel-summary-cards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6"></div>
+
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
+        <h2 class="text-sm font-semibold text-gray-700">Fleet Maintenance Register</h2>
+        <div class="flex items-center gap-2">
+          <input id="fleet-search" oninput="renderFleetView()" placeholder="Search tasks…"
+            class="form-input text-xs px-3 rounded-lg w-48">
+          <span id="fleet-task-count" class="text-xs text-gray-400 mono"></span>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-xs text-gray-500 uppercase tracking-wider bg-gray-50 border-b border-gray-100">
+              <th class="px-4 py-3 text-left font-semibold">Vessel</th>
+              <th class="px-4 py-3 text-left font-semibold">Category</th>
+              <th class="px-4 py-3 text-left font-semibold">Task Description</th>
+              <th class="px-4 py-3 text-left font-semibold">Interval</th>
+              <th class="px-4 py-3 text-left font-semibold">Last Done</th>
+              <th class="px-4 py-3 text-left font-semibold">Next Due</th>
+              <th class="px-4 py-3 text-left font-semibold">Status</th>
+              <th class="px-4 py-3 text-left font-semibold">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="fleet-table-body"></tbody>
+        </table>
+      </div>
+      <div id="fleet-empty" class="hidden py-14 text-center text-gray-400">
+        <svg class="w-10 h-10 mx-auto mb-2 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+        </svg>
+        <p class="text-sm">No tasks match the current filters.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- VESSEL VIEW -->
+  <div id="view-vessel" class="section hidden">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+      <div class="flex items-center gap-4">
+        <div id="vessel-icon" class="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-blue-50 border border-blue-100 shadow-sm"></div>
+        <div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <h1 id="vessel-title" class="text-xl font-bold text-gray-900"></h1>
+            <button onclick="openEditVesselModal()"
+              class="px-2 py-0.5 rounded-md btn-secondary text-xs font-medium flex items-center gap-1">
+              <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 012.828 0l.172.172a2 2 0 010 2.828L12 16H9v-3z"/>
+              </svg>
+              Edit Info
+            </button>
+            <button onclick="openCopyPMSModal()"
+              class="px-2 py-0.5 rounded-md text-xs font-medium flex items-center gap-1 bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-colors">
+              <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+              </svg>
+              Copy PMS
+            </button>
+            <button id="vessel-delete-btn" onclick="deleteCurrentVessel()"
+              class="px-2 py-0.5 rounded-md btn-danger text-xs font-medium flex items-center gap-1">
+              <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+              Delete Vessel
+            </button>
+          </div>
+          <p id="vessel-subtitle" class="text-sm text-gray-500 mt-0.5"></p>
+        </div>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <select id="vessel-filter-status" onchange="renderVesselView()" class="form-input text-xs px-3 rounded-lg">
+          <option value="all">All Statuses</option>
+          <option value="overdue">Overdue Only</option>
+          <option value="coming-due">Coming Due</option>
+          <option value="compliant">Compliant</option>
+        </select>
+        <select id="vessel-filter-category" onchange="renderVesselView()" class="form-input text-xs px-3 rounded-lg">
+          <option value="all">All Categories</option>
+        </select>
+        <input id="vessel-search" oninput="renderVesselView()" placeholder="Search tasks…"
+          class="form-input text-xs px-3 rounded-lg w-40">
+      </div>
+    </div>
+
+    <div id="vessel-kpi-strip" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6"></div>
+    <div id="vessel-compliance-bar" class="bg-white rounded-xl border border-gray-200 shadow-sm p-4 mb-6"></div>
+
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
+        <h2 id="vessel-table-title" class="text-sm font-semibold text-gray-700">Maintenance Register</h2>
+        <span id="vessel-task-count" class="text-xs text-gray-400 mono"></span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-xs text-gray-500 uppercase tracking-wider bg-gray-50 border-b border-gray-100">
+              <th class="px-4 py-3 text-left font-semibold">Category</th>
+              <th class="px-4 py-3 text-left font-semibold">Task Description</th>
+              <th class="px-4 py-3 text-left font-semibold">Interval</th>
+              <th class="px-4 py-3 text-left font-semibold">Last Done</th>
+              <th class="px-4 py-3 text-left font-semibold">Next Due</th>
+              <th class="px-4 py-3 text-left font-semibold">Days Left</th>
+              <th class="px-4 py-3 text-left font-semibold">Status</th>
+              <th class="px-4 py-3 text-left font-semibold">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="vessel-table-body"></tbody>
+        </table>
+      </div>
+      <div id="vessel-empty" class="hidden py-14 text-center text-gray-400">
+        <svg class="w-10 h-10 mx-auto mb-2 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+        </svg>
+        <p class="text-sm">No tasks match the current filters.</p>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ===== CLOSE-OUT MODAL ===== -->
+<div id="closeout-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <div>
+        <h2 class="text-base font-bold text-gray-900">Close-Out Report</h2>
+        <p id="closeout-task-subtitle" class="text-xs text-gray-400 mt-0.5"></p>
+      </div>
+      <button onclick="closeModal('closeout-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div id="closeout-task-banner" class="mx-6 mt-4 p-3 rounded-xl bg-gray-50 border border-gray-200 text-xs grid grid-cols-2 gap-2"></div>
+    <form id="closeout-form" onsubmit="submitCloseOut(event)" class="px-6 py-4 space-y-4">
+      <input type="hidden" id="closeout-task-id">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Date of Inspection / Maintenance <span class="text-red-500">*</span></label>
+          <input type="date" id="closeout-date" required class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Chief Engineer / Master Sign-off <span class="text-red-500">*</span></label>
+          <input type="text" id="closeout-signoff" required placeholder="Full name and rank"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm" autocomplete="off">
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Work Done / Details of Inspection <span class="text-red-500">*</span></label>
+        <textarea id="closeout-work-done" required rows="3"
+          placeholder="Describe the maintenance work carried out, procedures followed, measurements taken…"
+          class="form-input w-full px-3 py-2 rounded-lg text-sm resize-none"></textarea>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Parts Used / Findings / Remarks</label>
+        <textarea id="closeout-parts" rows="2"
+          placeholder="List any parts replaced, consumables used, or observations noted."
+          class="form-input w-full px-3 py-2 rounded-lg text-sm resize-none"></textarea>
+      </div>
+      <!-- Drill Attendees — shown only for Safety / Drills tasks -->
+      <div id="drill-attendees-section" class="hidden">
+        <div class="flex items-center gap-2 mb-1.5">
+          <label class="text-xs font-semibold text-gray-600">Drill Attendees <span class="text-red-500">*</span></label>
+          <span class="text-xs text-gray-400">(all crew present must be listed)</span>
+        </div>
+        <div class="flex gap-2 mb-2">
+          <input type="text" id="attendee-input" placeholder="Enter name and press Add or Enter…"
+            class="form-input flex-1 px-3 py-2 rounded-lg text-sm"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addAttendee();}">
+          <button type="button" onclick="addAttendee()"
+            class="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors whitespace-nowrap">
+            + Add
+          </button>
+        </div>
+        <div id="attendee-tags" class="flex flex-wrap gap-1.5 min-h-[2rem] p-2 rounded-lg bg-gray-50 border border-gray-200"></div>
+        <div class="flex items-center justify-between mt-1">
+          <span id="attendee-count" class="text-xs text-gray-400">0 attendees listed</span>
+          <button type="button" onclick="clearAttendees()" class="text-xs text-gray-400 hover:text-red-500 transition-colors">Clear all</button>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Condition Assessment</label>
+        <div class="flex gap-4">
+          <label class="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
+            <input type="radio" name="condition" value="Good" checked class="accent-green-600"> Good
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
+            <input type="radio" name="condition" value="Fair" class="accent-yellow-500"> Fair
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
+            <input type="radio" name="condition" value="Poor - Action Required" class="accent-red-500"> Poor — Action Required
+          </label>
+        </div>
+      </div>
+      <div id="next-due-preview" class="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs hidden">
+        <div class="flex items-center gap-2 text-blue-700">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+          </svg>
+          Next due date will reset to: <strong id="next-due-preview-date" class="text-blue-900 ml-1"></strong>
+        </div>
+      </div>
+      <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
+        <button type="button" onclick="closeModal('closeout-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
+        <button type="submit" id="closeout-submit-btn" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          Submit & Reset Schedule
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===== ADD TASK MODAL ===== -->
+<div id="add-task-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <h2 class="text-base font-bold text-gray-900">New Maintenance Task</h2>
+      <button onclick="closeModal('add-task-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <form id="add-task-form" onsubmit="submitAddTask(event)" class="px-6 py-4 space-y-4">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Vessel <span class="text-red-500">*</span></label>
+          <select id="new-task-vessel" required class="form-input w-full px-3 rounded-lg text-sm"></select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Category <span class="text-red-500">*</span></label>
+          <select id="new-task-category" required class="form-input w-full px-3 rounded-lg text-sm">
+            <option value="">Select category…</option>
+            <option>Safety / Drills</option>
+            <option>Propulsion / Main Engine</option>
+            <option>Electrical / Power</option>
+            <option>Hull / Structure</option>
+            <option>Navigation / Bridge</option>
+            <option>Environmental / Compliance</option>
+            <option>Deck / Mooring</option>
+            <option>Hotel / Accommodations</option>
+            <option>HVAC / Refrigeration</option>
+            <option>Cargo / Ballast</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Task Name / Description <span class="text-red-500">*</span></label>
+        <input type="text" id="new-task-name" required placeholder="e.g., Fire Pump Weekly Test"
+          class="form-input w-full px-3 py-2 rounded-lg text-sm">
+      </div>
+      <div class="grid grid-cols-3 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Interval Type <span class="text-red-500">*</span></label>
+          <select id="new-task-interval-type" onchange="updateIntervalLabel()" required class="form-input w-full px-3 rounded-lg text-sm">
+            <option value="days">Calendar (Days)</option>
+            <option value="months">Calendar (Months)</option>
+            <option value="hours">Running Hours</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Frequency <span id="interval-unit-label" class="text-gray-400 font-normal">(days)</span> <span class="text-red-500">*</span></label>
+          <input type="number" id="new-task-frequency" required min="1" placeholder="30"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Last Done Date <span class="text-red-500">*</span></label>
+          <input type="date" id="new-task-last-done" required class="form-input w-full px-3 rounded-lg text-sm">
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Priority</label>
+          <select id="new-task-priority" class="form-input w-full px-3 rounded-lg text-sm">
+            <option value="normal">Normal</option>
+            <option value="high">High</option>
+            <option value="critical">Critical</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Notes (optional)</label>
+          <input type="text" id="new-task-notes" placeholder="Regulatory ref., responsible officer…"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+      </div>
+      <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
+        <button type="button" onclick="closeModal('add-task-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
+        <button type="submit" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+          Add Task
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===== ADD VESSEL MODAL ===== -->
+<div id="add-vessel-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-lg shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <h2 class="text-base font-bold text-gray-900">Add New Vessel</h2>
+      <button onclick="closeModal('add-vessel-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <form id="add-vessel-form" onsubmit="submitAddVessel(event)" class="px-6 py-4 space-y-4">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="sm:col-span-2">
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Vessel Name <span class="text-red-500">*</span></label>
+          <input type="text" id="new-vessel-name" required placeholder="e.g., MV Northern Star"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Vessel Type <span class="text-red-500">*</span></label>
+          <select id="new-vessel-type" required class="form-input w-full px-3 rounded-lg text-sm">
+            <option value="">Select type…</option>
+            <option>General Cargo</option>
+            <option>Bulk Carrier</option>
+            <option>Tanker (Chemical)</option>
+            <option>Tanker (Oil)</option>
+            <option>Container Ship</option>
+            <option>RoRo Vessel</option>
+            <option>Passenger / Ferry</option>
+            <option>Offshore Supply Vessel</option>
+            <option>Tug / Workboat</option>
+            <option>Dredger</option>
+            <option>Other</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Flag State <span class="text-red-500">*</span></label>
+          <input type="text" id="new-vessel-flag" required placeholder="e.g., Marshall Islands"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">IMO Number</label>
+          <input type="text" id="new-vessel-imo" placeholder="e.g., 9876543" maxlength="7"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm mono">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Crew Size</label>
+          <input type="number" id="new-vessel-crew" placeholder="e.g., 20" min="1" max="200"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Master / Captain</label>
+          <input type="text" id="new-vessel-master" placeholder="Capt. Full Name"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Chief Engineer</label>
+          <input type="text" id="new-vessel-chief" placeholder="C/E Full Name"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Vessel Icon</label>
+          <div class="grid grid-cols-6 gap-1.5" id="icon-picker">
+            <!-- filled by JS -->
+          </div>
+          <input type="hidden" id="new-vessel-icon" value="🚢">
+        </div>
+      </div>
+      <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
+        <button type="button" onclick="closeModal('add-vessel-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
+        <button type="submit" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+          Add Vessel
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===== EDIT TASK MODAL ===== -->
+<div id="edit-task-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <h2 class="text-base font-bold text-gray-900">Edit Maintenance Task</h2>
+      <button onclick="closeModal('edit-task-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <form id="edit-task-form" onsubmit="submitEditTask(event)" class="px-6 py-4 space-y-4">
+      <input type="hidden" id="edit-task-id">
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Vessel <span class="text-red-500">*</span></label>
+          <select id="edit-task-vessel" required class="form-input w-full px-3 rounded-lg text-sm"></select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Category <span class="text-red-500">*</span></label>
+          <select id="edit-task-category" required class="form-input w-full px-3 rounded-lg text-sm">
+            <option>Safety / Drills</option>
+            <option>Propulsion / Main Engine</option>
+            <option>Electrical / Power</option>
+            <option>Hull / Structure</option>
+            <option>Navigation / Bridge</option>
+            <option>Environmental / Compliance</option>
+            <option>Deck / Mooring</option>
+            <option>Hotel / Accommodations</option>
+            <option>HVAC / Refrigeration</option>
+            <option>Cargo / Ballast</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Task Name / Description <span class="text-red-500">*</span></label>
+        <input type="text" id="edit-task-name" required class="form-input w-full px-3 py-2 rounded-lg text-sm">
+      </div>
+
+      <div class="grid grid-cols-3 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Interval Type <span class="text-red-500">*</span></label>
+          <select id="edit-task-interval-type" onchange="updateEditIntervalLabel()" required class="form-input w-full px-3 rounded-lg text-sm">
+            <option value="days">Calendar (Days)</option>
+            <option value="months">Calendar (Months)</option>
+            <option value="hours">Running Hours</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Frequency <span id="edit-interval-unit-label" class="text-gray-400 font-normal">(days)</span> <span class="text-red-500">*</span></label>
+          <input type="number" id="edit-task-frequency" required min="1" class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Last Done Date <span class="text-red-500">*</span></label>
+          <input type="date" id="edit-task-last-done" required class="form-input w-full px-3 rounded-lg text-sm">
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Priority</label>
+          <select id="edit-task-priority" class="form-input w-full px-3 rounded-lg text-sm">
+            <option value="normal">Normal</option>
+            <option value="high">High</option>
+            <option value="critical">Critical</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Notes</label>
+          <input type="text" id="edit-task-notes" class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+      </div>
+
+      <!-- Next due preview -->
+      <div class="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs">
+        <div class="flex items-center gap-2 text-blue-700">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+          </svg>
+          Next due will be: <strong id="edit-task-next-due-preview" class="text-blue-900 ml-1"></strong>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
+        <button type="button" onclick="closeModal('edit-task-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
+        <button type="submit" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          Save Changes
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===== EDIT VESSEL MODAL ===== -->
+<div id="edit-vessel-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-lg shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <h2 class="text-base font-bold text-gray-900">Edit Vessel Information</h2>
+      <button onclick="closeModal('edit-vessel-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <form id="edit-vessel-form" onsubmit="submitEditVessel(event)" class="px-6 py-4 space-y-4">
+      <input type="hidden" id="edit-vessel-id">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="sm:col-span-2">
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Vessel Name <span class="text-red-500">*</span></label>
+          <input type="text" id="edit-vessel-name" required class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Vessel Type <span class="text-red-500">*</span></label>
+          <select id="edit-vessel-type" required class="form-input w-full px-3 rounded-lg text-sm">
+            <option>General Cargo</option><option>Bulk Carrier</option><option>Tanker (Chemical)</option>
+            <option>Tanker (Oil)</option><option>Container Ship</option><option>RoRo Vessel</option>
+            <option>Passenger / Ferry</option><option>Offshore Supply Vessel</option><option>Tug / Workboat</option>
+            <option>Dredger</option><option>Other</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Flag State <span class="text-red-500">*</span></label>
+          <input type="text" id="edit-vessel-flag" required class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">IMO Number</label>
+          <input type="text" id="edit-vessel-imo" maxlength="7" class="form-input w-full px-3 py-2 rounded-lg text-sm mono">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Crew Size</label>
+          <input type="number" id="edit-vessel-crew" min="1" max="200" class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Master / Captain</label>
+          <input type="text" id="edit-vessel-master" class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Chief Engineer</label>
+          <input type="text" id="edit-vessel-chief" class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Vessel Icon</label>
+          <div class="grid grid-cols-10 gap-1" id="edit-icon-picker"></div>
+          <input type="hidden" id="edit-vessel-icon">
+        </div>
+      </div>
+      <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
+        <button type="button" onclick="closeModal('edit-vessel-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
+        <button type="submit" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          Save Changes
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===== COPY PMS MODAL ===== -->
+<div id="copy-pms-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <div>
+        <h2 class="text-base font-bold text-gray-900">Copy PMS to Other Vessels</h2>
+        <p id="copy-pms-subtitle" class="text-xs text-gray-400 mt-0.5"></p>
+      </div>
+      <button onclick="closeModal('copy-pms-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="px-6 py-4 space-y-5">
+      <!-- Step 1: target vessels -->
+      <div>
+        <div class="flex items-center gap-2 mb-2">
+          <span class="w-5 h-5 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center shrink-0">1</span>
+          <span class="text-sm font-semibold text-gray-700">Copy to which vessel(s)?</span>
+        </div>
+        <div id="copy-target-vessels" class="flex flex-wrap gap-2"></div>
+      </div>
+
+      <!-- Step 2: copy mode -->
+      <div>
+        <div class="flex items-center gap-2 mb-2">
+          <span class="w-5 h-5 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center shrink-0">2</span>
+          <span class="text-sm font-semibold text-gray-700">How should existing tasks on the target vessel be handled?</span>
+        </div>
+        <div class="flex flex-col gap-2">
+          <label class="flex items-start gap-3 p-3 rounded-xl border border-gray-200 cursor-pointer hover:border-blue-300 hover:bg-blue-50 transition-colors">
+            <input type="radio" name="copy-mode" value="append" checked class="mt-0.5 accent-blue-600">
+            <div>
+              <div class="text-sm font-semibold text-gray-800">Append — add selected tasks alongside existing tasks</div>
+              <div class="text-xs text-gray-500 mt-0.5">Duplicates may occur if the target already has the same tasks.</div>
+            </div>
+          </label>
+          <label class="flex items-start gap-3 p-3 rounded-xl border border-gray-200 cursor-pointer hover:border-blue-300 hover:bg-blue-50 transition-colors">
+            <input type="radio" name="copy-mode" value="replace" class="mt-0.5 accent-blue-600">
+            <div>
+              <div class="text-sm font-semibold text-gray-800">Replace — remove all existing tasks, then copy selected</div>
+              <div class="text-xs text-red-500 mt-0.5">⚠ This permanently deletes the target vessel's current task list and history.</div>
+            </div>
+          </label>
+          <label class="flex items-start gap-3 p-3 rounded-xl border border-gray-200 cursor-pointer hover:border-blue-300 hover:bg-blue-50 transition-colors">
+            <input type="radio" name="copy-mode" value="skip-dupes" class="mt-0.5 accent-blue-600">
+            <div>
+              <div class="text-sm font-semibold text-gray-800">Smart merge — skip tasks with the same name that already exist</div>
+              <div class="text-xs text-gray-500 mt-0.5">Safest option. Only new tasks are added; existing ones are untouched.</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <!-- Step 3: task selection -->
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <div class="flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center shrink-0">3</span>
+            <span class="text-sm font-semibold text-gray-700">Which tasks to copy?</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="copySelectAll(true)"  class="text-xs text-blue-600 hover:underline font-medium">Select all</button>
+            <span class="text-gray-300">|</span>
+            <button onclick="copySelectAll(false)" class="text-xs text-gray-500 hover:underline">Deselect all</button>
+            <span id="copy-selected-count" class="text-xs text-gray-400 mono ml-1"></span>
+          </div>
+        </div>
+        <!-- Category filter pills -->
+        <div id="copy-cat-filters" class="flex flex-wrap gap-1.5 mb-3"></div>
+        <!-- Task list -->
+        <div id="copy-task-list" class="border border-gray-200 rounded-xl overflow-hidden divide-y divide-gray-100 max-h-64 overflow-y-auto"></div>
+      </div>
+
+      <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
+        <button type="button" onclick="closeModal('copy-pms-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
+        <button onclick="executeCopyPMS()"
+          class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+          </svg>
+          Copy Tasks
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== HISTORY MODAL ===== -->
+<div id="history-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-2xl max-h-[88vh] flex flex-col shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100 shrink-0">
+      <div>
+        <h2 class="text-base font-bold text-gray-900">Maintenance History</h2>
+        <p id="history-task-subtitle" class="text-xs text-gray-400 mt-0.5"></p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="printHistoryReport()" title="Print all reports"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-xs font-medium text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/>
+          </svg>
+          Print All
+        </button>
+        <button onclick="closeModal('history-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="history-body" class="px-6 py-4 space-y-4 overflow-y-auto"></div>
+  </div>
+</div>
+
+<!-- Hidden print area — populated before window.print() -->
+<div id="print-area" class="hidden"></div>
+
+<!-- ===== TOAST ===== -->
+<div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+<script>
+'use strict';
+
+const TODAY = new Date();
+TODAY.setHours(0,0,0,0);
+// NOTE: FleetGuard now persists exclusively to Cloud Firestore.
+// localStorage / STORAGE_KEY are no longer used (see the Firebase
+// module script in <head> and the onXSnapshot() bridge below).
+
+const CATEGORY_CLASSES = {
+  'Safety / Drills':            'cat-safety',
+  'Propulsion / Main Engine':   'cat-propulsion',
+  'Electrical / Power':         'cat-electrical',
+  'Hull / Structure':           'cat-hull',
+  'Navigation / Bridge':        'cat-navigation',
+  'Environmental / Compliance': 'cat-environmental',
+  'Deck / Mooring':             'cat-deck',
+  'Hotel / Accommodations':     'cat-hotel',
+  'HVAC / Refrigeration':       'cat-propulsion',
+  'Cargo / Ballast':            'cat-hull',
+};
+
+const VESSEL_ICONS = ['🚢','🛳','⛴','🚤','⛵','🛥','🏭','⛽','🔧','⚓'];
+
+// ── REPORT FIELD CONFIG ───────────────────────────────────────
+// Add or remove entries here to extend the Daily Log form — no other code changes needed.
+const REPORT_FIELDS = [
+  { key:'weather',  label:'Weather / Sea State',  type:'text',   placeholder:'e.g. Calm, BF3 NE, 1.5m swell', section:'conditions' },
+  { key:'robFuel',  label:'Fuel ROB (MT)',         type:'number', placeholder:'0.0', step:'0.1',  section:'rob' },
+  { key:'robLube',  label:'Lube Oil ROB (L)',       type:'number', placeholder:'0',   step:'1',    section:'rob' },
+  { key:'robWater', label:'Fresh Water ROB (T)',    type:'number', placeholder:'0.0', step:'0.1',  section:'rob' },
+];
+
+// Engine component definitions — drives both Daily Log and task mapping.
+const ENGINE_FIELDS = [
+  { key:'me1', label:'Main Engine 1',  abbr:'ME1' },
+  { key:'me2', label:'Main Engine 2',  abbr:'ME2' },
+  { key:'ae1', label:'Aux Engine 1',   abbr:'AE1' },
+  { key:'ae2', label:'Aux Engine 2',   abbr:'AE2' },
+];
+
+// ── SEED DATA ──────────────────────────────────────────────
+function getSeedData() {
+  const d = offset => {
+    const dt = new Date(TODAY);
+    dt.setDate(dt.getDate() + offset);
+    return dt.toISOString().split('T')[0];
+  };
+
+  const vessels = [
+    {
+      id:'v001', name:'MV Atlantic Horizon', type:'General Cargo',
+      flag:'Marshall Islands', imo:'9876543', icon:'🚢', crew:22,
+      chief:'C/E Dimitri Papadopoulos', master:'Capt. Erik Johansson',
+      currentRunningHours: { me1:14250, me2:0, ae1:8100, ae2:7950 },
+    },
+    {
+      id:'v002', name:'MV Pacific Trader', type:'Bulk Carrier',
+      flag:'Panama', imo:'9765432', icon:'🏭', crew:24,
+      chief:'C/E Wang Wei', master:'Capt. Carlos Mendes',
+      currentRunningHours: { me1:22400, me2:21800, ae1:11200, ae2:10900 },
+    },
+    {
+      id:'v003', name:'MV Gulf Voyager', type:'Tanker (Chemical)',
+      flag:'Liberia', imo:'9654321', icon:'⛽', crew:26,
+      chief:'C/E Oleksandr Kovalenko', master:'Capt. Mehmet Yilmaz',
+      currentRunningHours: { me1:9600, me2:9400, ae1:5200, ae2:5050 },
+    },
+  ];
+
+  // Calendar-based tasks: [vesselId, category, name, intervalType, frequency, lastDone, priority]
+  const calendarRaw = [
+    // ── Atlantic Horizon ──
+    ['v001','Safety / Drills',           'Abandon Ship Muster Drill',                'days', 30,  d(-28),'critical'],
+    ['v001','Safety / Drills',           'Fire & Smoke Drill — All Sections',        'days', 30,  d(-35),'critical'],
+    ['v001','Safety / Drills',           'Man Overboard (MOB) Drill',                'days', 30,  d(-10),'high'],
+    ['v001','Safety / Drills',           'Lifeboat Lowering & Engine Test',          'days', 90,  d(-88),'critical'],
+    ['v001','Safety / Drills',           'EPIRB Battery & Registration Check',       'days', 365, d(-200),'high'],
+    ['v001','Environmental / Compliance','SOx / ECA Fuel Switchover Log Review',     'days', 30,  d(-31),'high'],
+    ['v001','Environmental / Compliance','Oil Record Book Audit (Part II)',           'days', 30,  d(-5), 'normal'],
+    ['v001','Environmental / Compliance','Sewage Treatment Plant Inspection',        'days', 90,  d(-60),'normal'],
+    ['v001','Propulsion / Main Engine',  'Main Engine Lube Oil Sample Analysis',     'days', 30,  d(-8), 'high'],
+    ['v001','Propulsion / Main Engine',  'Turbocharger Blower Cleaning',             'days', 180, d(-150),'normal'],
+    ['v001','Electrical / Power',        'Emergency Generator Monthly Test Run',     'days', 30,  d(-15),'critical'],
+    ['v001','Electrical / Power',        'Main Switchboard Insulation Test',         'days', 90,  d(-45),'normal'],
+    ['v001','Hull / Structure',          'Bilge Pump Operation Test',                'days', 7,   d(-6), 'high'],
+    ['v001','Hull / Structure',          'Anchor Chain Inspection & Measurement',    'days', 365, d(-180),'normal'],
+    ['v001','Navigation / Bridge',       'GMDSS Equipment Self-Test & Log',          'days', 1,   d(-1), 'critical'],
+    ['v001','Navigation / Bridge',       'Radar Performance Monitor Check',          'days', 7,   d(-4), 'high'],
+    ['v001','Navigation / Bridge',       'Magnetic Compass Deviation Card Update',   'days', 365, d(-400),'normal'],
+    // ── Pacific Trader ──
+    ['v002','Safety / Drills',           'Abandon Ship Muster Drill',                'days', 30,  d(-12),'critical'],
+    ['v002','Safety / Drills',           'Fire Drill — Engine Room Flooding Scenario','days',30,  d(-42),'critical'],
+    ['v002','Safety / Drills',           'Immersion Suit Inspection',                'days', 365, d(-200),'high'],
+    ['v002','Environmental / Compliance','SOx / ECA Fuel Changeover Drill & Log',    'days', 30,  d(-25),'high'],
+    ['v002','Environmental / Compliance','Ballast Water Treatment System Test',      'days', 90,  d(-80),'high'],
+    ['v002','Propulsion / Main Engine',  'Main Engine Cylinder Liner Inspection',    'days', 180, d(-60),'high'],
+    ['v002','Propulsion / Main Engine',  'Auxiliary Boiler Water Treatment Check',   'days', 30,  d(-20),'normal'],
+    ['v002','Electrical / Power',        'Emergency Generator Weekly Run',           'days', 7,   d(-7), 'critical'],
+    ['v002','Electrical / Power',        'Battery Bank Capacity Test',               'days', 90,  d(-88),'normal'],
+    ['v002','Hull / Structure',          'Bilge Pump & Alarm System Test',           'days', 7,   d(-5), 'high'],
+    ['v002','Hull / Structure',          'Hold Hatch Cover Watertight Test',         'days', 365, d(-370),'high'],
+    ['v002','Deck / Mooring',            'Mooring Winch Brake Test',                 'days', 90,  d(-50),'normal'],
+    ['v002','Navigation / Bridge',       'AIS — Position / Voyage Data Verify',      'days', 7,   d(-8), 'critical'],
+    ['v002','Navigation / Bridge',       'GMDSS Equipment Self-Test & Log',          'days', 1,   d(-1), 'critical'],
+    // ── Gulf Voyager ──
+    ['v003','Safety / Drills',           'Abandon Ship Muster & Rescue Boat Drill',  'days', 30,  d(-33),'critical'],
+    ['v003','Safety / Drills',           'Gas Detection System Full Test',           'days', 30,  d(-2), 'critical'],
+    ['v003','Safety / Drills',           'Enclosed Space Entry Drill',               'days', 60,  d(-55),'critical'],
+    ['v003','Safety / Drills',           'Fixed Fire-Fighting System Alarm Test',    'days', 30,  d(-40),'critical'],
+    ['v003','Environmental / Compliance','SOx / ECA Scrubber Inspection & Log',      'days', 30,  d(-28),'high'],
+    ['v003','Environmental / Compliance','Cargo Tank Vent Valve Inspection',         'days', 90,  d(-20),'high'],
+    ['v003','Propulsion / Main Engine',  'Main Engine Cooling Water Treatment',      'days', 30,  d(-30),'normal'],
+    ['v003','Propulsion / Main Engine',  'Cargo Pump Motor Insulation Check',        'days', 90,  d(-70),'high'],
+    ['v003','Propulsion / Main Engine',  'Bow Thruster Gear Oil Sample',             'days', 90,  d(-10),'normal'],
+    ['v003','Electrical / Power',        'Emergency Generator Weekly Run',           'days', 7,   d(-8), 'critical'],
+    ['v003','Electrical / Power',        'Shore Power Connection Safety Check',      'days', 30,  d(-15),'normal'],
+    ['v003','Hull / Structure',          'Bilge Pump Weekly Test',                   'days', 7,   d(-9), 'high'],
+    ['v003','Hull / Structure',          'Cathodic Protection Potential Check',      'days', 90,  d(-85),'normal'],
+    ['v003','Cargo / Ballast',           'Cargo Tank Pressure/Vacuum Valve Test',    'days', 90,  d(-91),'high'],
+    ['v003','Navigation / Bridge',       'GMDSS Equipment Self-Test & Log',          'days', 1,   d(-1), 'critical'],
+  ];
+
+  // Hours-based tasks: [vesselId, category, name, frequency, component, lastDoneHours, priority]
+  const hoursRaw = [
+    ['v001','Propulsion / Main Engine','ME1 — Lube Oil Change',         250, 'me1', 14100,'high'],
+    ['v001','Propulsion / Main Engine','ME1 — Fuel Injector Service',   500, 'me1', 14000,'high'],
+    ['v001','Electrical / Power',      'AE1 — 1000-Hour Service',      1000, 'ae1',  7500,'critical'],
+    ['v001','Electrical / Power',      'AE2 — 500-Hour Inspection',     500, 'ae2',  7700,'normal'],
+    ['v002','Propulsion / Main Engine','ME1 — Lube Oil Change',         250, 'me1', 22300,'high'],
+    ['v002','Propulsion / Main Engine','ME2 — Lube Oil Change',         250, 'me2', 21700,'high'],
+    ['v002','Propulsion / Main Engine','ME1 — Piston Rod Inspection',   500, 'me1', 22100,'high'],
+    ['v002','Electrical / Power',      'AE2 — 500-Hour Inspection',     500, 'ae2', 10700,'normal'],
+    ['v003','Propulsion / Main Engine','ME1 — Top End Overhaul',        500, 'me1',  9300,'critical'],
+    ['v003','Propulsion / Main Engine','ME2 — Lube Oil Change',         250, 'me2',  9250,'high'],
+    ['v003','Electrical / Power',      'AE1 — Running Hour Service',    250, 'ae1',  5100,'high'],
+  ];
+
+  let idCounter = 1;
+
+  const tasks = [
+    ...calendarRaw.map(r => ({
+      id: `t${String(idCounter++).padStart(3,'0')}`,
+      vesselId: r[0], category: r[1], name: r[2],
+      intervalType: r[3], frequency: r[4], lastDone: r[5], priority: r[6],
+      nextDue: computeNextDue(r[5], r[3], r[4]),
+      history: [], notes: '',
+      // hours fields not applicable
+      component: null, lastDoneHours: null,
+    })),
+    ...hoursRaw.map(r => ({
+      id: `t${String(idCounter++).padStart(3,'0')}`,
+      vesselId: r[0], category: r[1], name: r[2],
+      intervalType: 'hours', frequency: r[3],
+      component: r[4], lastDoneHours: r[5], priority: r[6],
+      // Calendar fields not applicable for hours tasks
+      lastDone: null, nextDue: null,
+      history: [], notes: '',
+    })),
+  ];
+
+  return { vessels, tasks, logs: [], reports: [] };
+}
+// ── DATE UTILITIES ──────────────────────────────────────────
+function parseDate(str) {
+  if (!str) return null;
+  const d = new Date(str + 'T00:00:00');
+  return isNaN(d) ? null : d;
+}
+function formatDate(str) {
+  const d = parseDate(str);
+  if (!d) return '—';
+  return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' });
+}
+function daysUntil(dateStr) {
+  const d = parseDate(dateStr);
+  if (!d) return null;
+  return Math.round((d - TODAY) / 86400000);
+}
+function computeNextDue(lastDone, intervalType, frequency) {
+  const last = parseDate(lastDone);
+  if (!last) return null;
+  const next = new Date(last);
+  if (intervalType === 'months') next.setMonth(next.getMonth() + frequency);
+  else if (intervalType === 'days') next.setDate(next.getDate() + frequency);
+  else next.setDate(next.getDate() + Math.ceil(frequency / 24));
+  return next.toISOString().split('T')[0];
+}
+function intervalLabel(intervalType, frequency) {
+  if (intervalType === 'hours') return `${frequency} Hrs`;
+  if (intervalType === 'months') return `${frequency} Mo.`;
+  if (frequency % 365 === 0) return `${frequency/365} Yr`;
+  if (frequency % 30 === 0)  return `${frequency/30} Mo.`;
+  if (frequency % 7 === 0)   return `${frequency/7} Wk`;
+  return `${frequency} Days`;
+}
+
+// ── RUNNING HOURS HELPER ─────────────────────────────────────
+function getHoursRemaining(task) {
+  const vessel = state.vessels.find(v => v.id === task.vesselId);
+  const comp   = task.component || 'me1';
+  const currentHrs = vessel?.currentRunningHours?.[comp] ?? 0;
+  return (task.lastDoneHours ?? 0) + task.frequency - currentHrs;
+}
+
+// ── STATUS ──────────────────────────────────────────────────
+function getStatus(task) {
+  if (task.intervalType === 'hours') {
+    const rem = getHoursRemaining(task);
+    if (rem <= 0)  return 'overdue';
+    if (rem <= 50) return 'coming-due';
+    return 'compliant';
+  }
+  const days = daysUntil(task.nextDue);
+  if (days === null) return 'unknown';
+  if (days < 0) return 'overdue';
+  const intervalDays = task.intervalType === 'months' ? task.frequency * 30 : task.frequency;
+  const yellowWindow = Math.min(Math.max(14, Math.floor(intervalDays * 0.1)), 30);
+  if (days <= yellowWindow) return 'coming-due';
+  return 'compliant';
+}
+
+function statusBadge(task) {
+  const s = getStatus(task);
+  if (task.intervalType === 'hours') {
+    const rem = getHoursRemaining(task);
+    const abs = Math.abs(rem);
+    if (s === 'overdue')
+      return `<span class="status-red inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${abs>100?'pulse-red':''}"><span class="w-1.5 h-1.5 rounded-full bg-red-500 inline-block"></span>Overdue ${abs}h</span>`;
+    if (s === 'coming-due')
+      return `<span class="status-yellow inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-yellow-500 inline-block"></span>Due in ${rem}h</span>`;
+    return `<span class="status-green inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>${rem}h left</span>`;
+  }
+  const days = daysUntil(task.nextDue);
+  const abs  = Math.abs(days);
+  if (s === 'overdue')
+    return `<span class="status-red inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${abs>30?'pulse-red':''}"><span class="w-1.5 h-1.5 rounded-full bg-red-500 inline-block"></span>Overdue ${abs}d</span>`;
+  if (s === 'coming-due')
+    return `<span class="status-yellow inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-yellow-500 inline-block"></span>Due in ${days}d</span>`;
+  return `<span class="status-green inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>${days}d</span>`;
+}
+
+function rowClass(task) {
+  const s = getStatus(task);
+  if (s === 'overdue')    return 'overdue';
+  if (s === 'coming-due') return 'coming-due';
+  return 'compliant';
+}
+
+function priorityBadge(p) {
+  if (p === 'critical') return '<span class="text-xs font-bold text-red-600 uppercase tracking-wide">CRIT</span>';
+  if (p === 'high')     return '<span class="text-xs font-semibold text-amber-600">High</span>';
+  return '';
+}
+// ── STATE ────────────────────────────────────────────────────
+let state = { vessels:[], tasks:[], logs:[], reports:[] };
+let currentView = 'fleet';
+let currentVesselId = null;
+let _dbConnected = false; // becomes true once the first Firestore snapshot arrives
+
+// ── FIRESTORE REAL-TIME BRIDGE ──────────────────────────────────
+// These four functions are called by the Firebase module script in
+// <head> every time its onSnapshot() listeners receive fresh data
+// (both the very first read and every subsequent live update from
+// any client). They replace loadState()/saveState()/localStorage
+// entirely — Firestore *is* the single source of truth now, and
+// `state` is just a local, always-fresh mirror of it used for
+// rendering.
+let _sawVesselsSnapshot = false, _sawTasksSnapshot = false, _seedChecked = false;
+
+function onVesselsSnapshot(vessels) {
+  // Back-fill running-hours map so older/partial docs don't break the UI
+  vessels.forEach(v => {
+    if (!v.currentRunningHours) {
+      v.currentRunningHours = { me1:0, me2:0, ae1:0, ae2:0 };
+    } else {
+      ['me1','me2','ae1','ae2'].forEach(k => {
+        if (typeof v.currentRunningHours[k] !== 'number') v.currentRunningHours[k] = 0;
+      });
+    }
+  });
+  state.vessels = vessels;
+  _dbConnected = true;
+  _sawVesselsSnapshot = true;
+  _maybeSeedEmptyDatabase();
+  buildVesselNav();
+  rerenderCurrentView();
+}
+
+function onTasksSnapshot(tasks) {
+  tasks.forEach(t => {
+    if (!Array.isArray(t.history)) t.history = [];
+    if (t.intervalType === 'hours') {
+      if (typeof t.lastDoneHours !== 'number') t.lastDoneHours = 0;
+      if (!t.component) t.component = 'me1';
+    } else {
+      if (t.component     === undefined) t.component     = null;
+      if (t.lastDoneHours === undefined) t.lastDoneHours = null;
+    }
+  });
+  state.tasks = tasks;
+  _sawTasksSnapshot = true;
+  _maybeSeedEmptyDatabase();
+  rerenderCurrentView();
+}
+
+function onLogsSnapshot(logs) {
+  state.logs = logs;
+}
+
+function onReportsSnapshot(reports) {
+  state.reports = reports;
+}
+
+function rerenderCurrentView() {
+  if (currentView === 'fleet') renderFleetView();
+  else if (currentView === 'vessel' && currentVesselId) renderVesselView();
+}
+
+// The first time both collections have reported in, if the database
+// is completely empty (e.g. a brand-new Firebase project), seed it
+// once with FleetGuard's demo fleet so the app isn't blank on first
+// run. Guarded by _seedChecked so it only ever fires a single time
+// per page load, never on subsequent legitimate empty states (e.g.
+// right after the user deletes every vessel on purpose).
+function _maybeSeedEmptyDatabase() {
+  if (_seedChecked || !_sawVesselsSnapshot || !_sawTasksSnapshot) return;
+  _seedChecked = true;
+  if (state.vessels.length === 0 && state.tasks.length === 0 && window.FGDB) {
+    window.FGDB.wipeAndReseed(getSeedData()).catch(err =>
+      console.error('FleetGuard: initial seed failed', err));
+  }
+}
+
+// ── VIEW MANAGEMENT ──────────────────────────────────────────
+function setView(viewKey, vesselId) {
+  currentView = viewKey;
+  if (vesselId) currentVesselId = vesselId;
+  document.getElementById('view-fleet').classList.toggle('hidden', viewKey !== 'fleet');
+  document.getElementById('view-vessel').classList.toggle('hidden', viewKey !== 'vessel');
+  document.querySelectorAll('.nav-pill').forEach(el => el.classList.remove('active'));
+  if (viewKey === 'fleet') document.getElementById('nav-fleet').classList.add('active');
+  else document.getElementById(`nav-vessel-${vesselId}`)?.classList.add('active');
+  if (viewKey === 'fleet') renderFleetView();
+  if (viewKey === 'vessel') renderVesselView();
+}
+
+function buildVesselNav() {
+  const container = document.getElementById('vessel-nav-container');
+  container.innerHTML = state.vessels.map(v => `
+    <button id="nav-vessel-${v.id}" onclick="setView('vessel','${v.id}')"
+      class="nav-pill flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-transparent text-xs font-medium text-gray-500 whitespace-nowrap">
+      <span>${v.icon}</span>${v.name.replace(/^(MV|SS|MT|MS)\s+/,'').split(' ').slice(0,2).join(' ')}
+    </button>
+  `).join('');
+}
+
+// ── FILTERS ──────────────────────────────────────────────────
+function sortTasks(tasks) {
+  const order = { overdue:0, 'coming-due':1, compliant:2 };
+  return tasks.sort((a,b) => {
+    const diff = (order[getStatus(a)]||2) - (order[getStatus(b)]||2);
+    if (diff !== 0) return diff;
+    return (daysUntil(a.nextDue)||0) - (daysUntil(b.nextDue)||0);
+  });
+}
+function getFilteredFleetTasks() {
+  const sf = document.getElementById('fleet-filter-status')?.value  || 'all';
+  const vf = document.getElementById('fleet-filter-vessel')?.value  || 'all';
+  const cf = document.getElementById('fleet-filter-category')?.value|| 'all';
+  const q  = (document.getElementById('fleet-search')?.value || '').toLowerCase();
+  return sortTasks(state.tasks.filter(t => {
+    if (vf!=='all' && t.vesselId!==vf) return false;
+    if (sf!=='all' && getStatus(t)!==sf) return false;
+    if (cf!=='all' && t.category!==cf) return false;
+    if (q && !t.name.toLowerCase().includes(q) && !t.category.toLowerCase().includes(q)) return false;
+    return true;
+  }));
+}
+function getFilteredVesselTasks() {
+  const sf = document.getElementById('vessel-filter-status')?.value  || 'all';
+  const cf = document.getElementById('vessel-filter-category')?.value|| 'all';
+  const q  = (document.getElementById('vessel-search')?.value || '').toLowerCase();
+  return sortTasks(state.tasks.filter(t => {
+    if (t.vesselId !== currentVesselId) return false;
+    if (sf!=='all' && getStatus(t)!==sf) return false;
+    if (cf!=='all' && t.category!==cf) return false;
+    if (q && !t.name.toLowerCase().includes(q) && !t.category.toLowerCase().includes(q)) return false;
+    return true;
+  }));
+}
+
+// ── FLEET RENDER ─────────────────────────────────────────────
+function renderFleetView() {
+  populateFleetFilters();
+  renderFleetKPIs();
+  renderVesselSummaryCards();
+  renderFleetTable();
+}
+function populateFleetFilters() {
+  const vSel = document.getElementById('fleet-filter-vessel');
+  const cSel = document.getElementById('fleet-filter-category');
+  if (!vSel||!cSel) return;
+  const cv=vSel.value, cc=cSel.value;
+  vSel.innerHTML = '<option value="all">All Vessels</option>' + state.vessels.map(v=>`<option value="${v.id}">${v.name}</option>`).join('');
+  vSel.value = cv;
+  const cats = [...new Set(state.tasks.map(t=>t.category))].sort();
+  cSel.innerHTML = '<option value="all">All Categories</option>' + cats.map(c=>`<option value="${c}">${c}</option>`).join('');
+  cSel.value = cc;
+}
+function renderFleetKPIs() {
+  const all = state.tasks;
+  const overdue   = all.filter(t=>getStatus(t)==='overdue').length;
+  const coming    = all.filter(t=>getStatus(t)==='coming-due').length;
+  const compliant = all.filter(t=>getStatus(t)==='compliant').length;
+  const critical  = all.filter(t=>t.priority==='critical'&&getStatus(t)!=='compliant').length;
+  const pct = all.length ? Math.round((compliant/all.length)*100) : 0;
+  const pctColor = pct>=80?'text-green-600':pct>=60?'text-amber-600':'text-red-600';
+  const kpis = [
+    {label:'Total Tasks',     value:all.length,   color:'text-gray-900', icon:'📋'},
+    {label:'Overdue',         value:overdue,       color:'text-red-600',  icon:'🔴'},
+    {label:'Coming Due',      value:coming,        color:'text-amber-600',icon:'🟡'},
+    {label:'Compliant',       value:compliant,     color:'text-green-600',icon:'🟢'},
+    {label:'Critical Alerts', value:critical,      color:'text-red-500',  icon:'⚠️'},
+    {label:'Fleet Compliance',value:pct+'%',       color:pctColor,        icon:'📊'},
+    {label:'Active Vessels',  value:state.vessels.length,color:'text-blue-600',icon:'🚢'},
+  ];
+  document.getElementById('fleet-kpi-strip').innerHTML = kpis.map(k=>`
+    <div class="stat-card rounded-xl p-3 shadow-sm">
+      <div class="text-xl">${k.icon}</div>
+      <div class="text-2xl font-bold ${k.color} mt-1">${k.value}</div>
+      <div class="text-xs text-gray-500 mt-0.5">${k.label}</div>
+    </div>
+  `).join('');
+}
+function renderVesselSummaryCards() {
+  document.getElementById('vessel-summary-cards').innerHTML = state.vessels.map(v => {
+    const vt = state.tasks.filter(t=>t.vesselId===v.id);
+    const overdue   = vt.filter(t=>getStatus(t)==='overdue').length;
+    const comingDue = vt.filter(t=>getStatus(t)==='coming-due').length;
+    const compliant = vt.filter(t=>getStatus(t)==='compliant').length;
+    const pct = vt.length ? Math.round((compliant/vt.length)*100) : 100;
+    const barColor = pct>=80?'bg-green-500':pct>=60?'bg-amber-500':'bg-red-500';
+    const pctColor = pct>=80?'text-green-600':pct>=60?'text-amber-600':'text-red-600';
+    return `
+      <div class="vessel-card rounded-xl p-4 shadow-sm" onclick="setView('vessel','${v.id}')">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl">${v.icon}</span>
+            <div>
+              <div class="text-sm font-bold text-gray-900">${v.name}</div>
+              <div class="text-xs text-gray-400">${v.type} · IMO ${v.imo||'—'}</div>
+            </div>
+          </div>
+          <div class="text-right">
+            <div class="text-xl font-bold ${pctColor}">${pct}%</div>
+            <div class="text-xs text-gray-400">compliant</div>
+          </div>
+        </div>
+        <div class="progress-bar mb-3">
+          <div class="progress-fill ${barColor}" style="width:${pct}%"></div>
+        </div>
+        <div class="flex items-center gap-2 text-xs flex-wrap">
+          ${overdue   ? `<span class="status-red px-1.5 py-0.5 rounded-md font-medium">${overdue} overdue</span>` : ''}
+          ${comingDue ? `<span class="status-yellow px-1.5 py-0.5 rounded-md font-medium">${comingDue} due soon</span>` : ''}
+          <span class="text-gray-400">${vt.length} tasks</span>
+          <span class="ml-auto text-blue-500 font-medium text-xs">View →</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+function renderFleetTable() {
+  const tasks = getFilteredFleetTasks();
+  const tbody = document.getElementById('fleet-table-body');
+  const empty = document.getElementById('fleet-empty');
+  document.getElementById('fleet-task-count').textContent = `${tasks.length} task${tasks.length!==1?'s':''}`;
+  if (!tasks.length) { tbody.innerHTML=''; empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  const vm = Object.fromEntries(state.vessels.map(v=>[v.id,v]));
+  tbody.innerHTML = tasks.map(t => {
+    const v = vm[t.vesselId]||{};
+    const catClass = CATEGORY_CLASSES[t.category]||'';
+    return `
+      <tr class="task-row ${rowClass(t)} bg-white" onclick="openCloseOut('${t.id}')">
+        <td class="px-4 py-2.5">
+          <div class="flex items-center gap-1.5 text-xs font-semibold text-gray-700">
+            <span>${v.icon||'🚢'}</span>${v.name||''}
+          </div>
+        </td>
+        <td class="px-4 py-2.5"><span class="inline-block px-2 py-0.5 rounded-md text-xs font-medium ${catClass}">${t.category}</span></td>
+        <td class="px-4 py-2.5">
+          <div class="flex items-center gap-2">
+            <span class="text-sm text-gray-800 font-medium">${t.name}</span>
+            ${priorityBadge(t.priority)}
+          </div>
+        </td>
+        <td class="px-4 py-2.5 mono text-xs text-gray-500">${intervalLabel(t.intervalType,t.frequency)}</td>
+        <td class="px-4 py-2.5 mono text-xs text-gray-500">${formatDate(t.lastDone)}</td>
+        <td class="px-4 py-2.5 mono text-xs text-gray-700 font-medium">${formatDate(t.nextDue)}</td>
+        <td class="px-4 py-2.5">${statusBadge(t)}</td>
+        <td class="px-4 py-2.5">
+          <div class="flex items-center gap-1 flex-wrap">
+            <button onclick="event.stopPropagation();openCloseOut('${t.id}')"
+              class="px-2 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors">Close Out</button>
+            <button onclick="event.stopPropagation();openHistory('${t.id}')"
+              class="px-2 py-1 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs transition-colors">Log</button>
+            <button onclick="event.stopPropagation();openEditTaskModal('${t.id}')"
+              class="px-2 py-1 rounded-md bg-gray-100 hover:bg-indigo-100 text-gray-500 hover:text-indigo-700 text-xs transition-colors" title="Edit task">Edit</button>
+            <button onclick="event.stopPropagation();deleteTask('${t.id}')"
+              class="px-2 py-1 rounded-md bg-gray-100 hover:bg-red-100 text-gray-400 hover:text-red-600 text-xs transition-colors" title="Delete task">✕</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+// ── VESSEL RENDER ────────────────────────────────────────────
+function renderVesselView() {
+  const vessel = state.vessels.find(v=>v.id===currentVesselId);
+  if (!vessel) { setView('fleet'); return; }
+  document.getElementById('vessel-icon').textContent   = vessel.icon;
+  document.getElementById('vessel-title').textContent  = vessel.name;
+  document.getElementById('vessel-subtitle').textContent = `${vessel.type} · ${vessel.flag} · IMO ${vessel.imo||'—'} · ${vessel.crew||'—'} crew`;
+  document.getElementById('vessel-table-title').textContent = `${vessel.name} — Maintenance Register`;
+  populateVesselCategoryFilter();
+  renderVesselKPIs(vessel);
+  renderVesselComplianceBar(vessel);
+  renderVesselTable();
+}
+function populateVesselCategoryFilter() {
+  const sel = document.getElementById('vessel-filter-category');
+  if (!sel) return;
+  const cur = sel.value;
+  const cats = [...new Set(state.tasks.filter(t=>t.vesselId===currentVesselId).map(t=>t.category))].sort();
+  sel.innerHTML = '<option value="all">All Categories</option>' + cats.map(c=>`<option value="${c}">${c}</option>`).join('');
+  sel.value = cur;
+}
+function renderVesselKPIs(vessel) {
+  const vt = state.tasks.filter(t=>t.vesselId===vessel.id);
+  const kpis = [
+    {label:'Total Tasks', value:vt.length,                                    color:'text-gray-900', icon:'📋'},
+    {label:'Overdue',     value:vt.filter(t=>getStatus(t)==='overdue').length, color:'text-red-600',  icon:'🔴'},
+    {label:'Coming Due',  value:vt.filter(t=>getStatus(t)==='coming-due').length,color:'text-amber-600',icon:'🟡'},
+    {label:'Compliant',   value:vt.filter(t=>getStatus(t)==='compliant').length, color:'text-green-600',icon:'🟢'},
+  ];
+  document.getElementById('vessel-kpi-strip').innerHTML = kpis.map(k=>`
+    <div class="stat-card rounded-xl p-3 shadow-sm">
+      <div class="text-xl">${k.icon}</div>
+      <div class="text-2xl font-bold ${k.color} mt-1">${k.value}</div>
+      <div class="text-xs text-gray-500 mt-0.5">${k.label}</div>
+    </div>
+  `).join('');
+}
+function renderVesselComplianceBar(vessel) {
+  const vt = state.tasks.filter(t=>t.vesselId===vessel.id);
+  const total = vt.length || 1;
+  const compliant = vt.filter(t=>getStatus(t)==='compliant').length;
+  const coming    = vt.filter(t=>getStatus(t)==='coming-due').length;
+  const overdue   = vt.filter(t=>getStatus(t)==='overdue').length;
+  const pc = Math.round((compliant/total)*100);
+  const py = Math.round((coming/total)*100);
+  const pr = Math.round((overdue/total)*100);
+  document.getElementById('vessel-compliance-bar').innerHTML = `
+    <div class="flex items-center justify-between mb-2">
+      <span class="text-xs font-semibold text-gray-600">Compliance Overview</span>
+      <div class="flex items-center gap-4 text-xs text-gray-500">
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>${pc}% Compliant</span>
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span>${py}% Due Soon</span>
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-500 inline-block"></span>${pr}% Overdue</span>
+      </div>
+    </div>
+    <div class="h-2.5 rounded-full bg-gray-100 overflow-hidden flex border border-gray-200">
+      <div class="bg-green-500 transition-all duration-700" style="width:${pc}%"></div>
+      <div class="bg-amber-400 transition-all duration-700" style="width:${py}%"></div>
+      <div class="bg-red-500 transition-all duration-700" style="width:${pr}%"></div>
+    </div>
+    <div class="flex flex-wrap gap-x-6 mt-2 text-xs text-gray-400">
+      <span>Master: <span class="text-gray-600 font-medium">${vessel.master||'—'}</span></span>
+      <span>C/E: <span class="text-gray-600 font-medium">${vessel.chief||'—'}</span></span>
+      <span>Crew: <span class="text-gray-600 font-medium">${vessel.crew||'—'}</span></span>
+      <span>Flag: <span class="text-gray-600 font-medium">${vessel.flag||'—'}</span></span>
+    </div>
+  `;
+}
+function renderVesselTable() {
+  const tasks = getFilteredVesselTasks();
+  const tbody = document.getElementById('vessel-table-body');
+  const empty = document.getElementById('vessel-empty');
+  document.getElementById('vessel-task-count').textContent = `${tasks.length} task${tasks.length!==1?'s':''}`;
+  if (!tasks.length) { tbody.innerHTML=''; empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+
+  const grouped = {};
+  tasks.forEach(t => { if(!grouped[t.category]) grouped[t.category]=[]; grouped[t.category].push(t); });
+
+  let html = '';
+  Object.entries(grouped).forEach(([cat, catTasks]) => {
+    const catClass = CATEGORY_CLASSES[cat]||'';
+    html += `<tr class="category-group-header">
+      <td colspan="8" class="px-4 py-2 border-b border-gray-100">
+        <span class="inline-block px-2.5 py-1 rounded-md text-xs font-bold ${catClass}">${cat}</span>
+        <span class="ml-2 text-xs text-gray-400">${catTasks.length} task${catTasks.length!==1?'s':''}</span>
+      </td>
+    </tr>`;
+    catTasks.forEach(t => {
+      const days = daysUntil(t.nextDue);
+      const daysDisplay = days===null ? '—' :
+        days<0  ? `<span class="text-red-600 font-semibold">${Math.abs(days)}d ago</span>` :
+        days===0 ? '<span class="text-amber-600 font-semibold">Today</span>' :
+        `<span class="${days<=14?'text-amber-600':'text-gray-600'}">${days}d</span>`;
+      html += `
+        <tr class="task-row ${rowClass(t)} bg-white" onclick="openCloseOut('${t.id}')">
+          <td class="px-4 py-2.5 pl-8"></td>
+          <td class="px-4 py-2.5">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-sm text-gray-800 font-medium">${t.name}</span>
+              ${priorityBadge(t.priority)}
+              ${t.history.length?`<span class="text-xs text-gray-400 mono">(${t.history.length}×)</span>`:''}
+            </div>
+            ${t.notes?`<div class="text-xs text-gray-400 mt-0.5">${t.notes}</div>`:''}
+          </td>
+          <td class="px-4 py-2.5 mono text-xs text-gray-500">${intervalLabel(t.intervalType,t.frequency)}</td>
+          <td class="px-4 py-2.5 mono text-xs text-gray-500">${formatDate(t.lastDone)}</td>
+          <td class="px-4 py-2.5 mono text-xs text-gray-700 font-medium">${formatDate(t.nextDue)}</td>
+          <td class="px-4 py-2.5 text-xs mono">${daysDisplay}</td>
+          <td class="px-4 py-2.5">${statusBadge(t)}</td>
+          <td class="px-4 py-2.5">
+            <div class="flex items-center gap-1 flex-wrap">
+              <button onclick="event.stopPropagation();openCloseOut('${t.id}')"
+                class="px-2 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors">Close Out</button>
+              <button onclick="event.stopPropagation();openHistory('${t.id}')"
+                class="px-2 py-1 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs transition-colors">Log</button>
+              <button onclick="event.stopPropagation();openEditTaskModal('${t.id}')"
+                class="px-2 py-1 rounded-md bg-gray-100 hover:bg-indigo-100 text-gray-500 hover:text-indigo-700 text-xs transition-colors" title="Edit task">Edit</button>
+              <button onclick="event.stopPropagation();deleteTask('${t.id}')"
+                class="px-2 py-1 rounded-md bg-gray-100 hover:bg-red-100 text-gray-400 hover:text-red-600 text-xs transition-colors" title="Delete task">✕</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    });
+  });
+  tbody.innerHTML = html;
+}
+
+// ── CLOSE-OUT ─────────────────────────────────────────────────
+let _currentCloseoutTask = null;
+
+function openCloseOut(taskId) {
+  const task   = state.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  _currentCloseoutTask = task;
+  const vessel = state.vessels.find(v => v.id === task.vesselId);
+  const isDrill = task.category === 'Safety / Drills' && /drill/i.test(task.name);
+
+  document.getElementById('closeout-task-id').value = taskId;
+  document.getElementById('closeout-task-subtitle').textContent = `${vessel?.name||''} · ${task.category}`;
+  document.getElementById('closeout-date').value = TODAY.toISOString().split('T')[0];
+  document.getElementById('closeout-signoff').value = vessel?.chief || '';
+  document.getElementById('closeout-work-done').value = '';
+  document.getElementById('closeout-parts').value = '';
+  document.querySelector('input[name="condition"][value="Good"]').checked = true;
+
+  // Update work-done label depending on task type
+  document.querySelector('label[for-section="work-done"]') // handled via placeholder below
+  document.getElementById('closeout-work-done').placeholder = isDrill
+    ? 'Describe the drill conducted, scenario used, time taken, equipment deployed…'
+    : 'Describe the maintenance work carried out, procedures followed, measurements taken…';
+
+  // Show/hide drill attendees section
+  const drillSection = document.getElementById('drill-attendees-section');
+  drillSection.classList.toggle('hidden', !isDrill);
+  clearAttendees();
+
+  document.getElementById('closeout-task-banner').innerHTML = `
+    <div><div class="text-gray-400 mb-0.5">Task</div><div class="font-semibold text-gray-800">${task.name}</div></div>
+    <div><div class="text-gray-400 mb-0.5">Interval</div><div class="font-semibold text-gray-800">${intervalLabel(task.intervalType,task.frequency)}</div></div>
+    <div><div class="text-gray-400 mb-0.5">Last Done</div><div class="font-semibold text-gray-800">${formatDate(task.lastDone)}</div></div>
+    <div><div class="text-gray-400 mb-0.5">Status</div><div>${statusBadge(task)}</div></div>
+  `;
+  updateNextDuePreview(task);
+  document.getElementById('closeout-date').oninput = () => updateNextDuePreview(task);
+  openModal('closeout-modal');
+}
+
+function updateNextDuePreview(task) {
+  const v = document.getElementById('closeout-date').value;
+  if (!v) return;
+  document.getElementById('next-due-preview').classList.remove('hidden');
+  document.getElementById('next-due-preview-date').textContent = formatDate(computeNextDue(v, task.intervalType, task.frequency));
+}
+
+async function submitCloseOut(e) {
+  e.preventDefault();
+  const taskId    = document.getElementById('closeout-task-id').value;
+  const date      = document.getElementById('closeout-date').value;
+  const signoff   = document.getElementById('closeout-signoff').value.trim();
+  const workDone  = document.getElementById('closeout-work-done').value.trim();
+  const parts     = document.getElementById('closeout-parts').value.trim();
+  const condition = document.querySelector('input[name="condition"]:checked')?.value || 'Good';
+  const isDrill   = _currentCloseoutTask?.category === 'Safety / Drills';
+
+  if (!date || !signoff || !workDone) { showToast('Please complete all required fields.', 'error'); return; }
+
+  // Drill attendees validation
+  const attendees = getAttendeeList();
+  if (isDrill && attendees.length === 0) {
+    showToast('Please add at least one drill attendee.', 'error');
+    document.getElementById('attendee-input').focus();
+    return;
+  }
+
+  const task = state.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  const newNextDue = computeNextDue(date, task.intervalType, task.frequency);
+
+  // logEntry has no client-side id yet — Firestore assigns one to
+  // the /logs document; we embed a plain copy (no id) into the
+  // task's own `history` array field since that copy is always
+  // read together with the task and doesn't need to be queried
+  // independently.
+  const logEntry = {
+    taskId, taskName: task.name, category: task.category, vesselId: task.vesselId,
+    completionDate: date, signoff, workDone,
+    parts: parts || 'None', condition,
+    attendees: isDrill ? attendees : [],
+    previousNextDue: task.nextDue, newNextDue,
+    loggedAt: new Date().toISOString(),
+  };
+
+  const submitBtn = document.getElementById('closeout-submit-btn');
+  submitBtn?.setAttribute('disabled', 'true');
+  try {
+    const updatedHistory = [logEntry, ...(task.history || [])];
+    await window.FGDB.updateTask(task.id, {
+      lastDone: date,
+      nextDue: newNextDue,
+      history: updatedHistory,
+    });
+    await window.FGDB.addLog(logEntry);
+    closeModal('closeout-modal');
+    showToast(`✓ Close-out recorded. Next due: ${formatDate(newNextDue)}`, 'success');
+  } catch (err) {
+    console.error('FleetGuard: close-out save failed', err);
+    showToast('Failed to save close-out. Check your connection and try again.', 'error');
+  } finally {
+    submitBtn?.removeAttribute('disabled');
+  }
+}
+
+// ── ATTENDEES ─────────────────────────────────────────────────
+function getAttendeeList() {
+  return [...document.querySelectorAll('.attendee-tag')].map(t => t.dataset.name);
+}
+function addAttendee() {
+  const input = document.getElementById('attendee-input');
+  const name  = input.value.trim();
+  if (!name) return;
+  // Prevent duplicate
+  if (getAttendeeList().map(n => n.toLowerCase()).includes(name.toLowerCase())) {
+    showToast(`"${name}" is already listed.`, 'info'); input.value=''; return;
+  }
+  const tag = document.createElement('span');
+  tag.className = 'attendee-tag flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium cursor-default';
+  tag.dataset.name = name;
+  tag.innerHTML = `${name}<button type="button" class="remove-att ml-0.5 text-blue-400 hover:text-red-500 font-bold leading-none" onclick="removeAttendee(this)" aria-label="Remove">×</button>`;
+  document.getElementById('attendee-tags').appendChild(tag);
+  input.value = '';
+  input.focus();
+  updateAttendeeCount();
+}
+function removeAttendee(btn) {
+  btn.closest('.attendee-tag').remove();
+  updateAttendeeCount();
+}
+function clearAttendees() {
+  document.getElementById('attendee-tags').innerHTML = '';
+  document.getElementById('attendee-input').value = '';
+  updateAttendeeCount();
+}
+function updateAttendeeCount() {
+  const n = getAttendeeList().length;
+  document.getElementById('attendee-count').textContent = `${n} attendee${n !== 1 ? 's' : ''} listed`;
+}
+
+// ── ADD TASK ──────────────────────────────────────────────────
+function openAddTaskModal() {
+  const sel = document.getElementById('new-task-vessel');
+  sel.innerHTML = state.vessels.map(v=>`<option value="${v.id}">${v.name}</option>`).join('');
+  if (currentVesselId) sel.value = currentVesselId;
+  document.getElementById('new-task-last-done').value = TODAY.toISOString().split('T')[0];
+  document.getElementById('add-task-form').reset();
+  sel.innerHTML = state.vessels.map(v=>`<option value="${v.id}">${v.name}</option>`).join('');
+  if (currentVesselId) sel.value = currentVesselId;
+  document.getElementById('new-task-last-done').value = TODAY.toISOString().split('T')[0];
+  openModal('add-task-modal');
+}
+function updateIntervalLabel() {
+  const t = document.getElementById('new-task-interval-type').value;
+  document.getElementById('interval-unit-label').textContent = {days:'(days)',months:'(months)',hours:'(hours)'}[t]||'';
+}
+async function submitAddTask(e) {
+  e.preventDefault();
+  const vesselId     = document.getElementById('new-task-vessel').value;
+  const category     = document.getElementById('new-task-category').value;
+  const name         = document.getElementById('new-task-name').value.trim();
+  const intervalType = document.getElementById('new-task-interval-type').value;
+  const frequency    = parseInt(document.getElementById('new-task-frequency').value,10);
+  const lastDone     = document.getElementById('new-task-last-done').value;
+  const priority     = document.getElementById('new-task-priority').value;
+  const notes        = document.getElementById('new-task-notes').value.trim();
+  if (!vesselId||!category||!name||!frequency||!lastDone) { showToast('Please fill in all required fields.','error'); return; }
+  try {
+    await window.FGDB.addTask({
+      vesselId, category, name, intervalType, frequency, lastDone,
+      nextDue: computeNextDue(lastDone, intervalType, frequency),
+      priority, notes, history: [],
+      component: intervalType === 'hours' ? 'me1' : null,
+      lastDoneHours: intervalType === 'hours' ? 0 : null,
+    });
+    closeModal('add-task-modal');
+    showToast(`✓ Task "${name}" added.`,'success');
+  } catch (err) {
+    console.error('FleetGuard: add task failed', err);
+    showToast('Failed to add task. Check your connection and try again.', 'error');
+  }
+}
+
+// ── ADD VESSEL ────────────────────────────────────────────────
+function openAddVesselModal() {
+  document.getElementById('add-vessel-form').reset();
+  document.getElementById('new-vessel-icon').value = '🚢';
+  // Build icon picker
+  document.getElementById('icon-picker').innerHTML = VESSEL_ICONS.map(icon => `
+    <button type="button" onclick="selectVesselIcon('${icon}', this)"
+      class="icon-opt w-9 h-9 rounded-lg border border-gray-200 flex items-center justify-center text-xl hover:border-blue-400 hover:bg-blue-50 transition-all ${icon==='🚢'?'border-blue-500 bg-blue-50':''}"
+      data-icon="${icon}">${icon}</button>
+  `).join('');
+  openModal('add-vessel-modal');
+}
+function selectVesselIcon(icon, btn) {
+  document.getElementById('new-vessel-icon').value = icon;
+  document.querySelectorAll('.icon-opt').forEach(b => b.classList.remove('border-blue-500','bg-blue-50'));
+  btn.classList.add('border-blue-500','bg-blue-50');
+}
+async function submitAddVessel(e) {
+  e.preventDefault();
+  const name   = document.getElementById('new-vessel-name').value.trim();
+  const type   = document.getElementById('new-vessel-type').value;
+  const flag   = document.getElementById('new-vessel-flag').value.trim();
+  const imo    = document.getElementById('new-vessel-imo').value.trim();
+  const crew   = parseInt(document.getElementById('new-vessel-crew').value)||0;
+  const master = document.getElementById('new-vessel-master').value.trim();
+  const chief  = document.getElementById('new-vessel-chief').value.trim();
+  const icon   = document.getElementById('new-vessel-icon').value||'🚢';
+  if (!name||!type||!flag) { showToast('Please fill in all required fields.','error'); return; }
+  try {
+    await window.FGDB.addVessel({
+      name, type, flag, imo, crew, master, chief, icon,
+      currentRunningHours: { me1:0, me2:0, ae1:0, ae2:0 },
+    });
+    closeModal('add-vessel-modal');
+    showToast(`✓ Vessel "${name}" added.`,'success');
+  } catch (err) {
+    console.error('FleetGuard: add vessel failed', err);
+    showToast('Failed to add vessel. Check your connection and try again.', 'error');
+  }
+}
+
+// ── DELETE VESSEL ─────────────────────────────────────────────
+async function deleteCurrentVessel() {
+  const vessel = state.vessels.find(v=>v.id===currentVesselId);
+  if (!vessel) return;
+  const relatedTasks = state.tasks.filter(t=>t.vesselId===currentVesselId);
+  const relatedLogs  = state.logs.filter(l=>l.vesselId===currentVesselId);
+  const msg = `Delete "${vessel.name}"?\n\nThis will also permanently delete ${relatedTasks.length} maintenance task${relatedTasks.length!==1?'s':''} and all their history.\n\nThis cannot be undone.`;
+  if (!confirm(msg)) return;
+  try {
+    // Cascade delete: vessel doc + every task doc + every log doc
+    // that references it, all in one atomic batch. (writeBatch()
+    // supports up to 500 operations — comfortably enough for a
+    // single vessel's task/log count in normal PMS usage; split
+    // into multiple batches if you expect vessels with 500+ tasks.)
+    const batch = window.FGDB.newBatch();
+    batch.delete(window.FGDB.vesselRef(vessel.id));
+    relatedTasks.forEach(t => batch.delete(window.FGDB.taskRef(t.id)));
+    relatedLogs.forEach(l => batch.delete(window.FGDB.logRef(l.id)));
+    await batch.commit();
+    showToast(`Vessel "${vessel.name}" deleted.`,'info');
+    setView('fleet');
+  } catch (err) {
+    console.error('FleetGuard: delete vessel failed', err);
+    showToast('Failed to delete vessel. Check your connection and try again.', 'error');
+  }
+}
+
+// ── DELETE TASK ───────────────────────────────────────────────
+async function deleteTask(taskId) {
+  const task = state.tasks.find(t=>t.id===taskId);
+  if (!task||!confirm(`Delete task "${task.name}"? This cannot be undone.`)) return;
+  try {
+    await window.FGDB.deleteTask(taskId);
+    showToast('Task deleted.','info');
+  } catch (err) {
+    console.error('FleetGuard: delete task failed', err);
+    showToast('Failed to delete task. Check your connection and try again.', 'error');
+  }
+}
+
+// ── HISTORY ───────────────────────────────────────────────────
+let _historyTaskId = null;
+
+function openHistory(taskId) {
+  _historyTaskId = taskId;
+  const task   = state.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  const vessel = state.vessels.find(v => v.id === task.vesselId);
+  document.getElementById('history-task-subtitle').textContent =
+    `${vessel?.name || ''} · ${task.name} · ${task.history?.length || 0} record${task.history?.length !== 1 ? 's' : ''}`;
+  document.getElementById('history-body').innerHTML = buildHistoryHTML(task, vessel);
+  openModal('history-modal');
+}
+
+function buildHistoryHTML(task, vessel) {
+  if (!task.history?.length) {
+    return `<div class="text-center py-10 text-gray-400 text-sm">
+      <svg class="w-8 h-8 mx-auto mb-2 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+      No close-out reports recorded yet for this task.
+    </div>`;
+  }
+
+  const isDrill = task.category === 'Safety / Drills' && /drill/i.test(task.name);
+  const condColor = c => c === 'Good' ? 'text-green-600 bg-green-50 border-green-200'
+                       : c === 'Fair' ? 'text-amber-600 bg-amber-50 border-amber-200'
+                       :                'text-red-600 bg-red-50 border-red-200';
+
+  return task.history.map((log, i) => {
+    const entryNo = task.history.length - i;
+    const attendeeBlock = isDrill && log.attendees?.length ? `
+      <div>
+        <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Drill Attendees (${log.attendees.length})</div>
+        <div class="flex flex-wrap gap-1.5">
+          ${log.attendees.map(a => `<span class="attendee-tag px-2 py-0.5 rounded-md text-xs font-medium">${a}</span>`).join('')}
+        </div>
+      </div>` : '';
+
+    return `
+      <div class="log-entry rounded-xl overflow-hidden">
+        <!-- Report header bar -->
+        <div class="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+          <div class="flex items-center gap-3">
+            <span class="text-xs font-bold text-blue-700 mono">${formatDate(log.completionDate)}</span>
+            ${isDrill ? '<span class="text-xs bg-red-100 text-red-700 border border-red-200 px-2 py-0.5 rounded-full font-semibold">Drill Record</span>' : ''}
+            <span class="text-xs text-gray-400">Report #${entryNo}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs border rounded-md px-2 py-0.5 font-semibold ${condColor(log.condition)}">${log.condition}</span>
+            <button onclick="printSingleReport('${task.id}',${i})"
+              class="no-print p-1 rounded-md hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors" title="Print this report">
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <!-- Report body -->
+        <div class="p-4 space-y-3">
+          <div class="grid grid-cols-2 gap-3 text-xs">
+            <div class="bg-gray-50 rounded-lg p-2.5">
+              <div class="text-gray-400 font-medium mb-0.5">Signed Off By</div>
+              <div class="text-gray-800 font-semibold">${log.signoff}</div>
+            </div>
+            <div class="bg-gray-50 rounded-lg p-2.5">
+              <div class="text-gray-400 font-medium mb-0.5">Next Due Reset To</div>
+              <div class="text-gray-800 font-semibold mono">${formatDate(log.newNextDue)}</div>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">${isDrill ? 'Drill Details' : 'Work Done / Details'}</div>
+            <div class="text-sm text-gray-700 leading-relaxed bg-gray-50 rounded-lg p-2.5">${log.workDone}</div>
+          </div>
+          ${log.parts && log.parts !== 'None' ? `
+          <div>
+            <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Parts Used / Findings</div>
+            <div class="text-sm text-gray-700 leading-relaxed bg-gray-50 rounded-lg p-2.5">${log.parts}</div>
+          </div>` : ''}
+          ${attendeeBlock}
+          <div class="text-xs text-gray-400 mono pt-1 border-t border-gray-100">
+            Logged: ${new Date(log.loggedAt).toLocaleString('en-GB', {day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})}
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ── PRINT ─────────────────────────────────────────────────────
+function buildPrintReport(task, vessel, logs) {
+  const isDrill = task.category === 'Safety / Drills' && /drill/i.test(task.name);
+  const condColor = c => c === 'Good' ? 'color:#15803d' : c === 'Fair' ? 'color:#a16207' : 'color:#dc2626';
+
+  const reportPages = logs.map((log, i) => {
+    const entryNo = task.history.length - task.history.indexOf(log);
+    const attendeeBlock = isDrill && log.attendees?.length ? `
+      <div style="margin-top:14px">
+        <div style="font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">
+          Drill Attendees (${log.attendees.length})
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          ${log.attendees.map(a => `<span style="background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;padding:2px 8px;border-radius:4px;font-size:9pt">${a}</span>`).join('')}
+        </div>
+      </div>` : '';
+
+    return `
+      <div style="${i > 0 ? 'page-break-before:always;padding-top:16mm' : ''}">
+        <!-- Letterhead -->
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #1d4ed8;padding-bottom:10px;margin-bottom:16px">
+          <div>
+            <div style="font-size:16pt;font-weight:800;color:#1d4ed8">FleetGuard PMS</div>
+            <div style="font-size:10pt;color:#374151;font-weight:600;margin-top:2px">${isDrill ? 'Drill Close-Out Report' : 'Maintenance Close-Out Report'}</div>
+          </div>
+          <div style="text-align:right;font-size:9pt;color:#6b7280">
+            <div style="font-weight:700;color:#374151">${vessel?.name || ''}</div>
+            <div>${vessel?.type || ''} · IMO ${vessel?.imo || '—'}</div>
+            <div>Flag: ${vessel?.flag || '—'}</div>
+          </div>
+        </div>
+
+        <!-- Report meta -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin-bottom:16px">
+          ${[
+            ['Task / Drill', task.name],
+            ['Category', task.category],
+            ['Report No.', `#${entryNo} of ${task.history.length}`],
+            ['Date', formatDate(log.completionDate)],
+            ['Interval', intervalLabel(task.intervalType, task.frequency)],
+            ['Condition', log.condition],
+            ['Signed Off By', log.signoff],
+            ['Next Due', formatDate(log.newNextDue)],
+          ].map(([k,v]) => `
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px">
+              <div style="font-size:8pt;color:#9ca3af;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px">${k}</div>
+              <div style="font-size:10pt;font-weight:700;${k==='Condition'?condColor(v):'color:#111827'}">${v}</div>
+            </div>`).join('')}
+        </div>
+
+        <!-- Work done -->
+        <div style="margin-bottom:14px">
+          <div style="font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">
+            ${isDrill ? 'Drill Scenario & Details' : 'Work Done / Details of Inspection'}
+          </div>
+          <div style="border:1px solid #e2e8f0;border-radius:6px;padding:10px;font-size:10pt;line-height:1.6;color:#1f2937;min-height:60px">${log.workDone}</div>
+        </div>
+
+        <!-- Parts/findings -->
+        ${log.parts && log.parts !== 'None' ? `
+        <div style="margin-bottom:14px">
+          <div style="font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Parts Used / Findings / Remarks</div>
+          <div style="border:1px solid #e2e8f0;border-radius:6px;padding:10px;font-size:10pt;line-height:1.6;color:#1f2937;min-height:40px">${log.parts}</div>
+        </div>` : ''}
+
+        ${attendeeBlock}
+
+        <!-- Signature block -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:24px;border-top:1px solid #e2e8f0;padding-top:16px">
+          <div>
+            <div style="font-size:9pt;color:#6b7280;margin-bottom:24px">Chief Engineer / Master Signature</div>
+            <div style="border-bottom:1px solid #374151;margin-bottom:4px;height:32px"></div>
+            <div style="font-size:9pt;font-weight:600;color:#374151">${log.signoff}</div>
+          </div>
+          <div>
+            <div style="font-size:9pt;color:#6b7280;margin-bottom:24px">Date</div>
+            <div style="border-bottom:1px solid #374151;margin-bottom:4px;height:32px"></div>
+            <div style="font-size:9pt;font-weight:600;color:#374151">${formatDate(log.completionDate)}</div>
+          </div>
+        </div>
+
+        <div style="margin-top:16px;font-size:8pt;color:#9ca3af;text-align:center">
+          Generated by FleetGuard PMS · ${new Date().toLocaleString('en-GB')} · Report logged: ${new Date(log.loggedAt).toLocaleString('en-GB')}
+        </div>
+      </div>`;
+  }).join('');
+
+  return reportPages;
+}
+
+function printSingleReport(taskId, historyIndex) {
+  const task   = state.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  const vessel = state.vessels.find(v => v.id === task.vesselId);
+  const log    = task.history[historyIndex];
+  if (!log) return;
+  const area = document.getElementById('print-area');
+  area.innerHTML = buildPrintReport(task, vessel, [log]);
+  window.print();
+  logReportGenerated('single-closeout', vessel, task, 1);
+}
+
+function printHistoryReport() {
+  if (!_historyTaskId) return;
+  const task   = state.tasks.find(t => t.id === _historyTaskId);
+  if (!task?.history?.length) { showToast('No reports to print.', 'info'); return; }
+  const vessel = state.vessels.find(v => v.id === task.vesselId);
+  const area   = document.getElementById('print-area');
+  area.innerHTML = buildPrintReport(task, vessel, task.history);
+  window.print();
+  logReportGenerated('full-history', vessel, task, task.history.length);
+}
+
+// ── FLEET REPORTS AUDIT TRAIL ────────────────────────────────────
+// Every printed/exported report is recorded as a document in the
+// `reports` Firestore collection — a lightweight, real-time audit
+// trail of what was generated, for which vessel/task, and when.
+// Fire-and-forget: a logging failure should never block printing.
+function logReportGenerated(type, vessel, task, entryCount) {
+  if (!window.FGDB) return;
+  window.FGDB.addReport({
+    type,
+    vesselId: vessel?.id || null,
+    vesselName: vessel?.name || null,
+    taskId: task?.id || null,
+    taskName: task?.name || null,
+    entryCount,
+    generatedAt: new Date().toISOString(),
+  }).catch(err => console.warn('FleetGuard: report audit log failed', err));
+}
+
+// ── MODALS ────────────────────────────────────────────────────
+function openModal(id) {
+  const m = document.getElementById(id);
+  m.classList.remove('hidden');
+  m.classList.add('flex');
+  document.body.style.overflow = 'hidden';
+}
+function closeModal(id) {
+  const m = document.getElementById(id);
+  m.classList.add('hidden');
+  m.classList.remove('flex');
+  document.body.style.overflow = '';
+  document.getElementById('next-due-preview')?.classList.add('hidden');
+}
+document.querySelectorAll('.modal-overlay').forEach(o => {
+  o.addEventListener('click', function(e) {
+    if (e.target===this) { this.classList.add('hidden'); this.classList.remove('flex'); document.body.style.overflow=''; }
+  });
+});
+document.addEventListener('keydown', e => {
+  if (e.key==='Escape') ['closeout-modal','add-task-modal','edit-task-modal','add-vessel-modal','edit-vessel-modal','copy-pms-modal','history-modal'].forEach(id=>{
+    const m=document.getElementById(id); if(!m.classList.contains('hidden')) closeModal(id);
+  });
+});
+
+// ── TOASTS ────────────────────────────────────────────────────
+function showToast(msg, type='info') {
+  const colors = { success:'bg-green-600 text-white', error:'bg-red-600 text-white', info:'bg-gray-700 text-white' };
+  const toast = document.createElement('div');
+  toast.className = `pointer-events-auto flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium shadow-lg transition-all duration-300 opacity-0 translate-y-2 ${colors[type]||colors.info}`;
+  toast.innerHTML = msg;
+  document.getElementById('toast-container').appendChild(toast);
+  requestAnimationFrame(() => toast.classList.remove('opacity-0','translate-y-2'));
+  setTimeout(()=>{ toast.classList.add('opacity-0','translate-y-2'); setTimeout(()=>toast.remove(),300); }, 4000);
+}
+
+// ── EDIT TASK ─────────────────────────────────────────────────
+function openEditTaskModal(taskId) {
+  const task = state.tasks.find(t => t.id === taskId);
+  if (!task) return;
+
+  // Populate vessel dropdown
+  const vesselSel = document.getElementById('edit-task-vessel');
+  vesselSel.innerHTML = state.vessels.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
+
+  document.getElementById('edit-task-id').value            = taskId;
+  vesselSel.value                                          = task.vesselId;
+  document.getElementById('edit-task-category').value      = task.category;
+  document.getElementById('edit-task-name').value          = task.name;
+  document.getElementById('edit-task-interval-type').value = task.intervalType;
+  document.getElementById('edit-task-frequency').value     = task.frequency;
+  document.getElementById('edit-task-last-done').value     = task.lastDone;
+  document.getElementById('edit-task-priority').value      = task.priority || 'normal';
+  document.getElementById('edit-task-notes').value         = task.notes || '';
+
+  updateEditIntervalLabel();
+  refreshEditNextDue();
+
+  // Live-update next-due preview when date/interval/frequency changes
+  ['edit-task-last-done', 'edit-task-frequency', 'edit-task-interval-type'].forEach(id => {
+    document.getElementById(id).oninput = refreshEditNextDue;
+    document.getElementById(id).onchange = refreshEditNextDue;
+  });
+
+  openModal('edit-task-modal');
+}
+
+function updateEditIntervalLabel() {
+  const t = document.getElementById('edit-task-interval-type').value;
+  document.getElementById('edit-interval-unit-label').textContent =
+    { days: '(days)', months: '(months)', hours: '(hours)' }[t] || '';
+}
+
+function refreshEditNextDue() {
+  const lastDone     = document.getElementById('edit-task-last-done').value;
+  const intervalType = document.getElementById('edit-task-interval-type').value;
+  const frequency    = parseInt(document.getElementById('edit-task-frequency').value, 10);
+  const preview      = document.getElementById('edit-task-next-due-preview');
+  if (lastDone && frequency > 0) {
+    preview.textContent = formatDate(computeNextDue(lastDone, intervalType, frequency));
+  } else {
+    preview.textContent = '—';
+  }
+}
+
+async function submitEditTask(e) {
+  e.preventDefault();
+  const taskId = document.getElementById('edit-task-id').value;
+  const task   = state.tasks.find(t => t.id === taskId);
+  if (!task) return;
+
+  const updated = {
+    vesselId:     document.getElementById('edit-task-vessel').value,
+    category:     document.getElementById('edit-task-category').value,
+    name:         document.getElementById('edit-task-name').value.trim(),
+    intervalType: document.getElementById('edit-task-interval-type').value,
+    frequency:    parseInt(document.getElementById('edit-task-frequency').value, 10),
+    lastDone:     document.getElementById('edit-task-last-done').value,
+    priority:     document.getElementById('edit-task-priority').value,
+    notes:        document.getElementById('edit-task-notes').value.trim(),
+  };
+  updated.nextDue = computeNextDue(updated.lastDone, updated.intervalType, updated.frequency);
+
+  try {
+    await window.FGDB.updateTask(taskId, updated);
+    closeModal('edit-task-modal');
+    showToast(`✓ Task "${updated.name}" updated.`, 'success');
+  } catch (err) {
+    console.error('FleetGuard: edit task failed', err);
+    showToast('Failed to update task. Check your connection and try again.', 'error');
+  }
+}
+
+// ── EDIT VESSEL ───────────────────────────────────────────────
+function openEditVesselModal() {
+  const vessel = state.vessels.find(v => v.id === currentVesselId);
+  if (!vessel) return;
+  document.getElementById('edit-vessel-id').value    = vessel.id;
+  document.getElementById('edit-vessel-name').value  = vessel.name;
+  document.getElementById('edit-vessel-type').value  = vessel.type;
+  document.getElementById('edit-vessel-flag').value  = vessel.flag;
+  document.getElementById('edit-vessel-imo').value   = vessel.imo  || '';
+  document.getElementById('edit-vessel-crew').value  = vessel.crew || '';
+  document.getElementById('edit-vessel-master').value= vessel.master|| '';
+  document.getElementById('edit-vessel-chief').value = vessel.chief || '';
+  document.getElementById('edit-vessel-icon').value  = vessel.icon;
+
+  // Build icon picker pre-selecting current icon
+  document.getElementById('edit-icon-picker').innerHTML = VESSEL_ICONS.map(icon => `
+    <button type="button" onclick="selectEditVesselIcon('${icon}',this)"
+      class="edit-icon-opt w-8 h-8 rounded-lg border flex items-center justify-center text-lg hover:border-blue-400 hover:bg-blue-50 transition-all ${icon === vessel.icon ? 'border-blue-500 bg-blue-50' : 'border-gray-200'}"
+      data-icon="${icon}">${icon}</button>
+  `).join('');
+
+  openModal('edit-vessel-modal');
+}
+
+function selectEditVesselIcon(icon, btn) {
+  document.getElementById('edit-vessel-icon').value = icon;
+  document.querySelectorAll('.edit-icon-opt').forEach(b => b.classList.remove('border-blue-500','bg-blue-50'));
+  btn.classList.add('border-blue-500','bg-blue-50');
+}
+
+async function submitEditVessel(e) {
+  e.preventDefault();
+  const id = document.getElementById('edit-vessel-id').value;
+  const vessel = state.vessels.find(v => v.id === id);
+  if (!vessel) return;
+
+  const updated = {
+    name:   document.getElementById('edit-vessel-name').value.trim(),
+    type:   document.getElementById('edit-vessel-type').value,
+    flag:   document.getElementById('edit-vessel-flag').value.trim(),
+    imo:    document.getElementById('edit-vessel-imo').value.trim(),
+    crew:   parseInt(document.getElementById('edit-vessel-crew').value) || 0,
+    master: document.getElementById('edit-vessel-master').value.trim(),
+    chief:  document.getElementById('edit-vessel-chief').value.trim(),
+    icon:   document.getElementById('edit-vessel-icon').value || '🚢',
+  };
+
+  try {
+    await window.FGDB.updateVessel(id, updated);
+    closeModal('edit-vessel-modal');
+    showToast(`✓ "${updated.name}" updated.`, 'success');
+  } catch (err) {
+    console.error('FleetGuard: edit vessel failed', err);
+    showToast('Failed to update vessel. Check your connection and try again.', 'error');
+  }
+}
+
+// ── COPY PMS ──────────────────────────────────────────────────
+let _copyActiveCatFilter = 'all';
+
+function openCopyPMSModal() {
+  const source = state.vessels.find(v => v.id === currentVesselId);
+  if (!source) return;
+
+  document.getElementById('copy-pms-subtitle').textContent =
+    `Source: ${source.name} · ${state.tasks.filter(t => t.vesselId === source.id).length} tasks available`;
+
+  // Target vessel chips (all vessels except current)
+  const targets = state.vessels.filter(v => v.id !== currentVesselId);
+  document.getElementById('copy-target-vessels').innerHTML = targets.length
+    ? targets.map(v => `
+        <button type="button" onclick="toggleCopyTarget('${v.id}', this)"
+          class="vessel-chip px-3 py-1.5 rounded-lg text-sm font-medium text-gray-600 flex items-center gap-1.5"
+          data-vessel-id="${v.id}">
+          <span>${v.icon}</span>${v.name}
+        </button>
+      `).join('')
+    : '<p class="text-sm text-gray-400">No other vessels in fleet. Add a vessel first.</p>';
+
+  // Reset category filter
+  _copyActiveCatFilter = 'all';
+
+  // Build category filter pills
+  const cats = [...new Set(state.tasks.filter(t => t.vesselId === currentVesselId).map(t => t.category))].sort();
+  document.getElementById('copy-cat-filters').innerHTML =
+    ['all', ...cats].map(c => `
+      <button type="button" onclick="setCopyCatFilter('${c}', this)"
+        class="copy-cat-pill px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${c === 'all' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-300'}"
+        data-cat="${c}">${c === 'all' ? 'All categories' : c}</button>
+    `).join('');
+
+  renderCopyTaskList();
+  openModal('copy-pms-modal');
+}
+
+function toggleCopyTarget(vesselId, btn) {
+  btn.classList.toggle('selected');
+}
+
+function setCopyCatFilter(cat, btn) {
+  _copyActiveCatFilter = cat;
+  document.querySelectorAll('.copy-cat-pill').forEach(b => {
+    const active = b.dataset.cat === cat;
+    b.classList.toggle('bg-blue-600', active);
+    b.classList.toggle('text-white', active);
+    b.classList.toggle('border-blue-600', active);
+    b.classList.toggle('bg-white', !active);
+    b.classList.toggle('text-gray-600', !active);
+    b.classList.toggle('border-gray-200', !active);
+  });
+  renderCopyTaskList();
+}
+
+function renderCopyTaskList() {
+  const sourceTasks = state.tasks.filter(t => {
+    if (t.vesselId !== currentVesselId) return false;
+    if (_copyActiveCatFilter !== 'all' && t.category !== _copyActiveCatFilter) return false;
+    return true;
+  });
+
+  // Group by category
+  const grouped = {};
+  sourceTasks.forEach(t => { if (!grouped[t.category]) grouped[t.category] = []; grouped[t.category].push(t); });
+
+  const container = document.getElementById('copy-task-list');
+  if (!sourceTasks.length) {
+    container.innerHTML = '<div class="py-6 text-center text-gray-400 text-sm">No tasks in this category.</div>';
+    updateCopyCount();
+    return;
+  }
+
+  let html = '';
+  Object.entries(grouped).forEach(([cat, tasks]) => {
+    const catClass = CATEGORY_CLASSES[cat] || '';
+    html += `<div class="px-3 py-1.5 bg-gray-50 flex items-center gap-2">
+      <span class="text-xs font-bold ${catClass} px-1.5 py-0.5 rounded">${cat}</span>
+      <span class="text-xs text-gray-400">${tasks.length} task${tasks.length!==1?'s':''}</span>
+    </div>`;
+    tasks.forEach(t => {
+      html += `
+        <div class="copy-task-row flex items-center gap-3 px-3 py-2 cursor-pointer" onclick="toggleCopyTask('${t.id}', this)">
+          <input type="checkbox" class="copy-task-cb accent-blue-600 w-4 h-4 shrink-0 pointer-events-none" data-task-id="${t.id}" checked>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm text-gray-800 font-medium truncate">${t.name}</div>
+            <div class="text-xs text-gray-400">${intervalLabel(t.intervalType, t.frequency)}</div>
+          </div>
+          ${priorityBadge(t.priority)}
+        </div>`;
+    });
+  });
+  container.innerHTML = html;
+  updateCopyCount();
+}
+
+function toggleCopyTask(taskId, row) {
+  const cb = row.querySelector('.copy-task-cb');
+  cb.checked = !cb.checked;
+  row.classList.toggle('selected', cb.checked);
+  updateCopyCount();
+}
+
+function copySelectAll(checked) {
+  document.querySelectorAll('.copy-task-cb').forEach(cb => { cb.checked = checked; cb.closest('.copy-task-row').classList.toggle('selected', checked); });
+  updateCopyCount();
+}
+
+function updateCopyCount() {
+  const total   = document.querySelectorAll('.copy-task-cb').length;
+  const checked = document.querySelectorAll('.copy-task-cb:checked').length;
+  document.getElementById('copy-selected-count').textContent = `${checked} / ${total} selected`;
+}
+
+async function executeCopyPMS() {
+  // Validate targets
+  const targetBtns = [...document.querySelectorAll('#copy-target-vessels .vessel-chip.selected')];
+  if (!targetBtns.length) { showToast('Select at least one target vessel.', 'error'); return; }
+  const targetIds = targetBtns.map(b => b.dataset.vesselId);
+
+  // Validate task selection
+  const checkedIds = [...document.querySelectorAll('.copy-task-cb:checked')].map(cb => cb.dataset.taskId);
+  if (!checkedIds.length) { showToast('Select at least one task to copy.', 'error'); return; }
+
+  const mode = document.querySelector('input[name="copy-mode"]:checked').value;
+  const sourceTasks = state.tasks.filter(t => checkedIds.includes(t.id));
+
+  // Confirm replace mode
+  if (mode === 'replace') {
+    const names = targetBtns.map(b => b.textContent.trim()).join(', ');
+    if (!confirm(`Replace ALL tasks on ${names}?\n\nThis permanently deletes their existing task lists and history. This cannot be undone.`)) return;
+  }
+
+  try {
+    // One atomic Firestore batch for the whole copy operation (up
+    // to 500 writes). Deletes (replace mode) and inserts are queued
+    // locally, then committed together in a single round-trip.
+    const batch = window.FGDB.newBatch();
+    let totalAdded = 0;
+
+    targetIds.forEach(targetId => {
+      if (mode === 'replace') {
+        state.tasks.filter(t => t.vesselId === targetId).forEach(t => batch.delete(window.FGDB.taskRef(t.id)));
+        state.logs.filter(l => l.vesselId === targetId).forEach(l => batch.delete(window.FGDB.logRef(l.id)));
+      }
+
+      sourceTasks.forEach(src => {
+        if (mode === 'skip-dupes') {
+          const exists = state.tasks.some(t => t.vesselId === targetId && t.name.toLowerCase() === src.name.toLowerCase());
+          if (exists) return;
+        }
+        batch.set(window.FGDB.newTaskRef(), {
+          vesselId: targetId,
+          category: src.category,
+          name: src.name,
+          intervalType: src.intervalType,
+          frequency: src.frequency,
+          lastDone: src.lastDone,
+          nextDue: src.nextDue,
+          priority: src.priority,
+          notes: src.notes || '',
+          history: [],
+          component: src.component ?? null,
+          lastDoneHours: src.lastDoneHours ?? null,
+        });
+        totalAdded++;
+      });
+    });
+
+    await batch.commit();
+    closeModal('copy-pms-modal');
+    const vesselNames = targetBtns.map(b => b.textContent.trim()).join(', ');
+    showToast(`✓ ${totalAdded} task${totalAdded!==1?'s':''} copied to ${vesselNames}.`, 'success');
+  } catch (err) {
+    console.error('FleetGuard: copy PMS failed', err);
+    showToast('Failed to copy tasks. Check your connection and try again.', 'error');
+  }
+}
+
+// ── RESET TO SEED DATA ──────────────────────────────────────────
+async function clearData() {
+  const msg = 'Reset all fleet data to the default demo dataset?\n\n' +
+              'This permanently deletes every vessel, task, and close-out ' +
+              'record currently stored in Firestore and replaces them with ' +
+              'FleetGuard\'s built-in seed data. This cannot be undone.';
+  if (!confirm(msg)) return;
+  if (!window.FGDB) { showToast('Not connected to the database yet — try again in a moment.', 'error'); return; }
+  try {
+    showToast('Resetting fleet data…', 'info');
+    await window.FGDB.wipeAndReseed(getSeedData());
+    showToast('✓ Fleet data reset to defaults.', 'success');
+    setView('fleet');
+  } catch (err) {
+    console.error('FleetGuard: reset failed', err);
+    showToast('Failed to reset data. Check your connection and try again.', 'error');
+  }
+}
+
+// ── INIT ──────────────────────────────────────────────────────
+// Note: `state` starts empty and the UI renders immediately in that
+// empty state — real data streams in a moment later the first time
+// Firestore's onVesselsSnapshot()/onTasksSnapshot() fire (see the
+// Firebase module script in <head>), and every render function is
+// re-invoked automatically from that point on for every live update.
+function init() {
+  buildVesselNav();
+  const el = document.getElementById('current-date-display');
+  if (el) el.textContent = TODAY.toLocaleDateString('en-GB',{weekday:'short',day:'2-digit',month:'short',year:'numeric'});
+  setView('fleet');
+}
+init();
+</script>
+</body>
+</html>
