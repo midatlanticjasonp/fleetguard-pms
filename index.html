@@ -203,6 +203,7 @@
   .task-row.overdue    { border-left: 3px solid #ef4444; }
   .task-row.coming-due { border-left: 3px solid #eab308; }
   .task-row.compliant  { border-left: 3px solid #22c55e; }
+  .task-row.unassigned { border-left: 3px solid #94a3b8; }
 
   .modal-overlay { background: rgba(15,23,42,0.5); backdrop-filter: blur(3px); }
 
@@ -437,6 +438,13 @@
               </svg>
               Copy PMS
             </button>
+            <button onclick="openLogHoursModal()"
+              class="px-2 py-0.5 rounded-md text-xs font-medium flex items-center gap-1 bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100 transition-colors">
+              <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              Log Running Hours
+            </button>
             <button id="vessel-delete-btn" onclick="deleteCurrentVessel()"
               class="px-2 py-0.5 rounded-md btn-danger text-xs font-medium flex items-center gap-1">
               <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
@@ -465,6 +473,7 @@
 
     <div id="vessel-kpi-strip" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6"></div>
     <div id="vessel-compliance-bar" class="bg-white rounded-xl border border-gray-200 shadow-sm p-4 mb-6"></div>
+    <div id="vessel-hours-panel" class="bg-white rounded-xl border border-gray-200 shadow-sm p-4 mb-6"></div>
 
     <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
       <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
@@ -672,6 +681,17 @@
           <input type="date" id="new-task-last-done" required class="form-input w-full px-3 rounded-lg text-sm">
         </div>
       </div>
+      <div id="new-task-equip-section" class="hidden grid grid-cols-2 gap-4 p-3 rounded-xl bg-gray-50 border border-gray-200">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Equipment <span class="text-red-500">*</span></label>
+          <select id="new-task-component" class="form-input w-full px-3 rounded-lg text-sm"></select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Hour-Meter at Last Done <span class="text-red-500">*</span></label>
+          <input type="number" id="new-task-last-done-hours" min="0" step="1" placeholder="e.g., 14000"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm mono">
+        </div>
+      </div>
       <div class="grid grid-cols-2 gap-4">
         <div>
           <label class="block text-xs font-semibold text-gray-600 mb-1.5">Priority</label>
@@ -764,6 +784,22 @@
           <input type="hidden" id="new-vessel-icon" value="🚢">
         </div>
       </div>
+
+      <div class="pt-2 border-t border-gray-100">
+        <div class="flex items-center justify-between mb-0.5">
+          <label class="block text-xs font-semibold text-gray-600">Equipment & Initial Running Hours</label>
+        </div>
+        <p class="text-xs text-gray-400 mb-2">Add each main engine and generator on this vessel with its starting hour-meter reading as of today. Running-hours maintenance tasks (oil changes, overhauls, etc.) count forward from these baselines. You can add or remove units later.</p>
+        <div id="new-vessel-equip-list" class="space-y-2 mb-2">
+          <!-- filled by JS -->
+        </div>
+        <button type="button" onclick="addNewVesselEquipRow()"
+          class="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-dashed border-gray-300 text-xs font-medium text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+          Add Engine / Generator
+        </button>
+      </div>
+
       <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
         <button type="button" onclick="closeModal('add-vessel-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
         <button type="submit" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2">
@@ -847,6 +883,18 @@
         <div>
           <label class="block text-xs font-semibold text-gray-600 mb-1.5">Last Done Date <span class="text-red-500">*</span></label>
           <input type="date" id="edit-task-last-done" required class="form-input w-full px-3 rounded-lg text-sm">
+        </div>
+      </div>
+
+      <div id="edit-task-equip-section" class="hidden grid grid-cols-2 gap-4 p-3 rounded-xl bg-gray-50 border border-gray-200">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Equipment <span class="text-red-500">*</span></label>
+          <select id="edit-task-component" class="form-input w-full px-3 rounded-lg text-sm"></select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Hour-Meter at Last Done <span class="text-red-500">*</span></label>
+          <input type="number" id="edit-task-last-done-hours" min="0" step="1"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm mono">
         </div>
       </div>
 
@@ -945,6 +993,80 @@
         </button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- ===== LOG RUNNING HOURS MODAL ===== -->
+<div id="hours-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-lg shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <div>
+        <h2 class="text-base font-bold text-gray-900">Log Running Hours</h2>
+        <p id="hours-modal-subtitle" class="text-xs text-gray-400 mt-0.5"></p>
+      </div>
+      <button onclick="closeModal('hours-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <form id="hours-form" onsubmit="submitLogHours(event)" class="px-6 py-4 space-y-4">
+      <input type="hidden" id="hours-vessel-id">
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Reading Date <span class="text-red-500">*</span></label>
+        <input type="date" id="hours-date" required class="form-input w-full px-3 rounded-lg text-sm">
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Recorded By <span class="text-red-500">*</span></label>
+        <input type="text" id="hours-signoff" required placeholder="Full name and rank" class="form-input w-full px-3 py-2 rounded-lg text-sm">
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-1.5">
+          <label class="block text-xs font-semibold text-gray-600">Hour-Meter Readings</label>
+          <span class="text-xs text-gray-400">New reading must be ≥ current</span>
+        </div>
+        <div id="hours-fields-grid" class="space-y-2">
+          <!-- filled by JS from ENGINE_FIELDS -->
+        </div>
+      </div>
+      <div id="hours-run-summary" class="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-700"></div>
+      <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
+        <button type="button" onclick="closeModal('hours-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
+        <button type="submit" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          Save Reading
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===== MANAGE EQUIPMENT MODAL ===== -->
+<div id="manage-equipment-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <div>
+        <h2 class="text-base font-bold text-gray-900">Manage Equipment</h2>
+        <p id="equip-modal-subtitle" class="text-xs text-gray-400 mt-0.5"></p>
+      </div>
+      <button onclick="closeModal('manage-equipment-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="px-6 py-4 space-y-4">
+      <p class="text-xs text-gray-400">Add, rename, or remove main engines and generators for this vessel. Running-hours maintenance tasks track against these units, so removing one will unassign any tasks linked to it.</p>
+      <div id="equip-rows-list" class="space-y-2"><!-- filled by JS --></div>
+      <button type="button" onclick="addEquipmentRow()"
+        class="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-dashed border-gray-300 text-xs font-medium text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+        Add Engine / Generator
+      </button>
+      <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
+        <button type="button" onclick="closeModal('manage-equipment-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
+        <button type="button" onclick="submitManageEquipment()" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          Save Equipment
+        </button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1099,13 +1221,30 @@ const REPORT_FIELDS = [
   { key:'robWater', label:'Fresh Water ROB (T)',    type:'number', placeholder:'0.0', step:'0.1',  section:'rob' },
 ];
 
-// Engine component definitions — drives both Daily Log and task mapping.
-const ENGINE_FIELDS = [
+// Default engine/generator set used only to seed new demo data and to
+// back-fill older vessel records that predate per-vessel equipment lists.
+// Each vessel's actual equipment now lives on vessel.equipment and can be
+// freely added to / removed / renamed per vessel (see Add/Edit Vessel).
+const DEFAULT_ENGINE_FIELDS = [
   { key:'me1', label:'Main Engine 1',  abbr:'ME1' },
   { key:'me2', label:'Main Engine 2',  abbr:'ME2' },
   { key:'ae1', label:'Aux Engine 1',   abbr:'AE1' },
   { key:'ae2', label:'Aux Engine 2',   abbr:'AE2' },
 ];
+
+// Returns a vessel's equipment list, falling back to the legacy default
+// for any record that somehow still lacks one (defense-in-depth; the
+// snapshot handler already back-fills this on load).
+function getVesselEquipment(vessel) {
+  return (vessel && Array.isArray(vessel.equipment) && vessel.equipment.length)
+    ? vessel.equipment
+    : DEFAULT_ENGINE_FIELDS;
+}
+
+// Generates a short, collision-resistant equipment key for a new unit.
+function newEquipmentKey() {
+  return 'eq_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
 
 // ── SEED DATA ──────────────────────────────────────────────
 function getSeedData() {
@@ -1120,19 +1259,37 @@ function getSeedData() {
       id:'v001', name:'MV Atlantic Horizon', type:'General Cargo',
       flag:'Marshall Islands', imo:'9876543', icon:'🚢', crew:22,
       chief:'C/E Dimitri Papadopoulos', master:'Capt. Erik Johansson',
+      equipment: [
+        { key:'me1', label:'Main Engine 1', abbr:'ME1' },
+        { key:'me2', label:'Main Engine 2', abbr:'ME2' },
+        { key:'ae1', label:'Aux Engine 1',  abbr:'AE1' },
+        { key:'ae2', label:'Aux Engine 2',  abbr:'AE2' },
+      ],
       currentRunningHours: { me1:14250, me2:0, ae1:8100, ae2:7950 },
     },
     {
       id:'v002', name:'MV Pacific Trader', type:'Bulk Carrier',
       flag:'Panama', imo:'9765432', icon:'🏭', crew:24,
       chief:'C/E Wang Wei', master:'Capt. Carlos Mendes',
-      currentRunningHours: { me1:22400, me2:21800, ae1:11200, ae2:10900 },
+      equipment: [
+        { key:'me1', label:'Main Engine 1', abbr:'ME1' },
+        { key:'me2', label:'Main Engine 2', abbr:'ME2' },
+        { key:'ae1', label:'Aux Engine 1',  abbr:'AE1' },
+        { key:'ae2', label:'Aux Engine 2',  abbr:'AE2' },
+        { key:'ae3', label:'Aux Engine 3',  abbr:'AE3' },
+      ],
+      currentRunningHours: { me1:22400, me2:21800, ae1:11200, ae2:10900, ae3:6400 },
     },
     {
       id:'v003', name:'MV Gulf Voyager', type:'Tanker (Chemical)',
       flag:'Liberia', imo:'9654321', icon:'⛽', crew:26,
       chief:'C/E Oleksandr Kovalenko', master:'Capt. Mehmet Yilmaz',
-      currentRunningHours: { me1:9600, me2:9400, ae1:5200, ae2:5050 },
+      equipment: [
+        { key:'me1', label:'Main Engine 1', abbr:'ME1' },
+        { key:'me2', label:'Main Engine 2', abbr:'ME2' },
+        { key:'ae1', label:'Aux Engine 1',  abbr:'AE1' },
+      ],
+      currentRunningHours: { me1:9600, me2:9400, ae1:5200 },
     },
   ];
 
@@ -1284,8 +1441,9 @@ function intervalLabel(intervalType, frequency) {
 // ── RUNNING HOURS HELPER ─────────────────────────────────────
 function getHoursRemaining(task) {
   const vessel = state.vessels.find(v => v.id === task.vesselId);
-  const comp   = task.component || 'me1';
-  const currentHrs = vessel?.currentRunningHours?.[comp] ?? 0;
+  const comp   = task.component;
+  if (!comp || !vessel || !(comp in (vessel.currentRunningHours || {}))) return null;
+  const currentHrs = vessel.currentRunningHours[comp] ?? 0;
   return (task.lastDoneHours ?? 0) + task.frequency - currentHrs;
 }
 
@@ -1293,6 +1451,7 @@ function getHoursRemaining(task) {
 function getStatus(task) {
   if (task.intervalType === 'hours') {
     const rem = getHoursRemaining(task);
+    if (rem === null) return 'unassigned';
     if (rem <= 0)  return 'overdue';
     if (rem <= 50) return 'coming-due';
     return 'compliant';
@@ -1308,6 +1467,9 @@ function getStatus(task) {
 
 function statusBadge(task) {
   const s = getStatus(task);
+  if (s === 'unassigned') {
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500 border border-slate-200"><span class="w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"></span>No equipment assigned</span>`;
+  }
   if (task.intervalType === 'hours') {
     const rem = getHoursRemaining(task);
     const abs = Math.abs(rem);
@@ -1330,6 +1492,7 @@ function rowClass(task) {
   const s = getStatus(task);
   if (s === 'overdue')    return 'overdue';
   if (s === 'coming-due') return 'coming-due';
+  if (s === 'unassigned') return 'unassigned';
   return 'compliant';
 }
 
@@ -1342,6 +1505,7 @@ function priorityBadge(p) {
 let state = { vessels:[], tasks:[], logs:[], reports:[] };
 let currentView = 'fleet';
 let currentVesselId = null;
+let _newVesselEquipment = [];
 let _dbConnected = false; // becomes true once the first Firestore snapshot arrives
 
 // ── FIRESTORE REAL-TIME BRIDGE ──────────────────────────────────
@@ -1355,15 +1519,18 @@ let _dbConnected = false; // becomes true once the first Firestore snapshot arri
 let _sawVesselsSnapshot = false, _sawTasksSnapshot = false, _seedChecked = false;
 
 function onVesselsSnapshot(vessels) {
-  // Back-fill running-hours map so older/partial docs don't break the UI
+  // Back-fill equipment list + running-hours map so older/partial docs
+  // don't break the UI. Vessels created before per-vessel equipment
+  // existed get the legacy 4-unit default (me1/me2/ae1/ae2); vessels
+  // that already have an `equipment` array are left as the user defined.
   vessels.forEach(v => {
-    if (!v.currentRunningHours) {
-      v.currentRunningHours = { me1:0, me2:0, ae1:0, ae2:0 };
-    } else {
-      ['me1','me2','ae1','ae2'].forEach(k => {
-        if (typeof v.currentRunningHours[k] !== 'number') v.currentRunningHours[k] = 0;
-      });
+    if (!Array.isArray(v.equipment) || !v.equipment.length) {
+      v.equipment = DEFAULT_ENGINE_FIELDS.map(f => ({ ...f }));
     }
+    if (!v.currentRunningHours) v.currentRunningHours = {};
+    v.equipment.forEach(eq => {
+      if (typeof v.currentRunningHours[eq.key] !== 'number') v.currentRunningHours[eq.key] = 0;
+    });
   });
   state.vessels = vessels;
   _dbConnected = true;
@@ -1378,7 +1545,7 @@ function onTasksSnapshot(tasks) {
     if (!Array.isArray(t.history)) t.history = [];
     if (t.intervalType === 'hours') {
       if (typeof t.lastDoneHours !== 'number') t.lastDoneHours = 0;
-      if (!t.component) t.component = 'me1';
+      if (t.component === undefined) t.component = null;
     } else {
       if (t.component     === undefined) t.component     = null;
       if (t.lastDoneHours === undefined) t.lastDoneHours = null;
@@ -1613,6 +1780,7 @@ function renderVesselView() {
   populateVesselCategoryFilter();
   renderVesselKPIs(vessel);
   renderVesselComplianceBar(vessel);
+  renderVesselHoursPanel(vessel);
   renderVesselTable();
 }
 function populateVesselCategoryFilter() {
@@ -1668,6 +1836,47 @@ function renderVesselComplianceBar(vessel) {
       <span>Crew: <span class="text-gray-600 font-medium">${vessel.crew||'—'}</span></span>
       <span>Flag: <span class="text-gray-600 font-medium">${vessel.flag||'—'}</span></span>
     </div>
+  `;
+}
+function renderVesselHoursPanel(vessel) {
+  const hoursTasks = state.tasks.filter(t => t.vesselId === vessel.id && t.intervalType === 'hours');
+  const lastLog = state.logs.find(l => l.vesselId === vessel.id && l.type === 'running-hours');
+  const equipment = getVesselEquipment(vessel);
+
+  document.getElementById('vessel-hours-panel').innerHTML = `
+    <div class="flex items-center justify-between mb-3">
+      <span class="text-xs font-semibold text-gray-600">Running Hours (Hour-Meter Readings)</span>
+      <div class="flex items-center gap-3">
+        <span class="text-xs text-gray-400">${lastLog ? `Last logged ${formatDate(lastLog.readingDate)} by ${lastLog.signoff}` : 'No readings logged yet'}</span>
+        <button onclick="openManageEquipmentModal()" class="text-xs font-medium text-blue-600 hover:text-blue-700 flex items-center gap-1">
+          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+          Manage Equipment
+        </button>
+      </div>
+    </div>
+    ${equipment.length === 0 ? `
+      <div class="py-6 text-center text-gray-400 text-sm">No equipment defined for this vessel yet. <button onclick="openManageEquipmentModal()" class="text-blue-600 hover:underline font-medium">Add engines / generators</button> to start tracking running hours.</div>
+    ` : `
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      ${equipment.map(f => {
+        const hrs = vessel.currentRunningHours?.[f.key] ?? 0;
+        const linked = hoursTasks.filter(t => t.component === f.key);
+        const soonest = linked.length
+          ? Math.min(...linked.map(t => getHoursRemaining(t)))
+          : null;
+        let soonestHtml = '<span class="text-gray-300">No hours-based tasks</span>';
+        if (soonest !== null) {
+          const cls = soonest <= 0 ? 'text-red-600' : (soonest <= 100 ? 'text-amber-600' : 'text-gray-500');
+          soonestHtml = `<span class="${cls} font-medium">${soonest <= 0 ? `${Math.abs(Math.round(soonest))} hrs overdue` : `${Math.round(soonest)} hrs to next task`}</span>`;
+        }
+        return `
+          <div class="rounded-lg border border-gray-200 p-3">
+            <div class="text-xs text-gray-500">${f.label}</div>
+            <div class="text-lg font-bold text-gray-900 mono mt-0.5">${hrs.toLocaleString()} <span class="text-xs font-normal text-gray-400">hrs</span></div>
+            <div class="text-xs mt-1">${soonestHtml}</div>
+          </div>`;
+      }).join('')}
+    </div>`}
   `;
 }
 function renderVesselTable() {
@@ -1965,19 +2174,36 @@ function openAddTaskModal() {
   const sel = document.getElementById('new-task-vessel');
   sel.innerHTML = state.vessels.map(v=>`<option value="${v.id}">${v.name}</option>`).join('');
   if (currentVesselId) sel.value = currentVesselId;
+  sel.onchange = () => refreshTaskEquipField('new');
   document.getElementById('new-task-last-done').value = TODAY.toISOString().split('T')[0];
   document.getElementById('add-task-form').reset();
-  sel.innerHTML = state.vessels.map(v=>`<option value="${v.id}">${v.name}</option>`).join('');
-  if (currentVesselId) sel.value = currentVesselId;
+  sel.value = currentVesselId || (state.vessels[0]?.id || '');
   document.getElementById('new-task-last-done').value = TODAY.toISOString().split('T')[0];
   newTaskChecklist = [];
   document.getElementById('new-task-checklist-input').value = '';
   renderChecklistBuilder('new');
+  updateIntervalLabel();
   openModal('add-task-modal');
 }
 function updateIntervalLabel() {
   const t = document.getElementById('new-task-interval-type').value;
   document.getElementById('interval-unit-label').textContent = {days:'(days)',months:'(months)',hours:'(hours)'}[t]||'';
+  document.getElementById('new-task-equip-section').classList.toggle('hidden', t !== 'hours');
+  if (t === 'hours') refreshTaskEquipField('new');
+}
+// Populates the Equipment <select> for the add/edit task modal from
+// whichever vessel is currently selected in that modal, so a task can
+// only be pointed at a unit that vessel actually has.
+function refreshTaskEquipField(mode) {
+  const vesselId = document.getElementById(`${mode==='new'?'new-task-vessel':'edit-task-vessel'}`).value;
+  const vessel = state.vessels.find(v => v.id === vesselId);
+  const equipment = getVesselEquipment(vessel);
+  const sel = document.getElementById(mode === 'new' ? 'new-task-component' : 'edit-task-component');
+  const prev = sel.value;
+  sel.innerHTML = equipment.length
+    ? equipment.map(f => `<option value="${f.key}">${f.label}</option>`).join('')
+    : '<option value="">No equipment on this vessel — add some first</option>';
+  if (equipment.some(f => f.key === prev)) sel.value = prev;
 }
 async function submitAddTask(e) {
   e.preventDefault();
@@ -1990,14 +2216,22 @@ async function submitAddTask(e) {
   const priority     = document.getElementById('new-task-priority').value;
   const notes        = document.getElementById('new-task-notes').value.trim();
   if (!vesselId||!category||!name||!frequency||!lastDone) { showToast('Please fill in all required fields.','error'); return; }
+
+  let component = null, lastDoneHours = null;
+  if (intervalType === 'hours') {
+    component = document.getElementById('new-task-component').value;
+    lastDoneHours = parseFloat(document.getElementById('new-task-last-done-hours').value);
+    if (!component) { showToast('Select which equipment this task tracks.', 'error'); return; }
+    if (!Number.isFinite(lastDoneHours) || lastDoneHours < 0) { showToast('Enter the hour-meter reading at last done.', 'error'); return; }
+  }
+
   try {
     await window.FGDB.addTask({
       vesselId, category, name, intervalType, frequency, lastDone,
       nextDue: computeNextDue(lastDone, intervalType, frequency),
       priority, notes, history: [],
       checklist: [...newTaskChecklist],
-      component: intervalType === 'hours' ? 'me1' : null,
-      lastDoneHours: intervalType === 'hours' ? 0 : null,
+      component, lastDoneHours,
     });
     closeModal('add-task-modal');
     showToast(`✓ Task "${name}" added${newTaskChecklist.length?` with ${newTaskChecklist.length} checklist item${newTaskChecklist.length!==1?'s':''}`:''}.`,'success');
@@ -2017,7 +2251,48 @@ function openAddVesselModal() {
       class="icon-opt w-9 h-9 rounded-lg border border-gray-200 flex items-center justify-center text-xl hover:border-blue-400 hover:bg-blue-50 transition-all ${icon==='🚢'?'border-blue-500 bg-blue-50':''}"
       data-icon="${icon}">${icon}</button>
   `).join('');
+  // Seed the equipment builder with two common starting units — fully
+  // editable/removable, just to reduce blank-slate friction.
+  _newVesselEquipment = [
+    { key: newEquipmentKey(), label: 'Main Engine 1', abbr: 'ME1', hours: 0 },
+    { key: newEquipmentKey(), label: 'Aux Generator 1', abbr: 'AG1', hours: 0 },
+  ];
+  renderNewVesselEquipRows();
   openModal('add-vessel-modal');
+}
+function renderNewVesselEquipRows() {
+  const list = document.getElementById('new-vessel-equip-list');
+  if (!_newVesselEquipment.length) {
+    list.innerHTML = '<div class="py-3 text-center text-gray-400 text-xs">No equipment added yet.</div>';
+    return;
+  }
+  list.innerHTML = _newVesselEquipment.map((eq, i) => `
+    <div class="flex items-center gap-2 p-2 rounded-lg border border-gray-200">
+      <div class="flex-1 grid grid-cols-2 gap-2">
+        <input type="text" placeholder="e.g., Main Engine 1" value="${eq.label.replace(/"/g,'&quot;')}"
+          oninput="_newVesselEquipment[${i}].label=this.value"
+          class="form-input px-2 py-1.5 rounded-lg text-sm">
+        <input type="text" placeholder="Abbr. e.g. ME1" value="${eq.abbr.replace(/"/g,'&quot;')}" maxlength="6"
+          oninput="_newVesselEquipment[${i}].abbr=this.value"
+          class="form-input px-2 py-1.5 rounded-lg text-sm mono">
+      </div>
+      <input type="number" min="0" step="1" placeholder="Start hrs" value="${eq.hours}"
+        oninput="_newVesselEquipment[${i}].hours=parseFloat(this.value)||0"
+        class="form-input w-24 px-2 py-1.5 rounded-lg text-sm mono" title="Initial running hours">
+      <button type="button" onclick="removeNewVesselEquipRow(${i})"
+        class="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors shrink-0">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+      </button>
+    </div>
+  `).join('');
+}
+function addNewVesselEquipRow() {
+  _newVesselEquipment.push({ key: newEquipmentKey(), label: '', abbr: '', hours: 0 });
+  renderNewVesselEquipRows();
+}
+function removeNewVesselEquipRow(i) {
+  _newVesselEquipment.splice(i, 1);
+  renderNewVesselEquipRows();
 }
 function selectVesselIcon(icon, btn) {
   document.getElementById('new-vessel-icon').value = icon;
@@ -2035,16 +2310,256 @@ async function submitAddVessel(e) {
   const chief  = document.getElementById('new-vessel-chief').value.trim();
   const icon   = document.getElementById('new-vessel-icon').value||'🚢';
   if (!name||!type||!flag) { showToast('Please fill in all required fields.','error'); return; }
+
+  // Equipment & initial running hours — becomes the baseline that every
+  // "hours"-interval maintenance task counts forward from.
+  for (const eq of _newVesselEquipment) {
+    if (!eq.label.trim()) { showToast('Every unit needs a name, or remove the blank row.', 'error'); return; }
+  }
+  const equipment = _newVesselEquipment.map(eq => ({
+    key: eq.key,
+    label: eq.label.trim(),
+    abbr: (eq.abbr || eq.label.trim().slice(0,4)).trim().toUpperCase(),
+  }));
+  const currentRunningHours = {};
+  _newVesselEquipment.forEach(eq => { currentRunningHours[eq.key] = eq.hours || 0; });
+
   try {
     await window.FGDB.addVessel({
       name, type, flag, imo, crew, master, chief, icon,
-      currentRunningHours: { me1:0, me2:0, ae1:0, ae2:0 },
+      equipment, currentRunningHours,
     });
     closeModal('add-vessel-modal');
     showToast(`✓ Vessel "${name}" added.`,'success');
   } catch (err) {
     console.error('FleetGuard: add vessel failed', err);
     showToast('Failed to add vessel. Check your connection and try again.', 'error');
+  }
+}
+
+// ── LOG RUNNING HOURS ────────────────────────────────────────
+// Records a new hour-meter reading per engine component. Readings only
+// move forward (a hour-meter can't run backwards), and the resulting
+// currentRunningHours feeds getHoursRemaining()/getStatus() directly —
+// so this is what actually drives due/overdue status for every
+// running-hours maintenance task.
+function openLogHoursModal() {
+  const vessel = state.vessels.find(v => v.id === currentVesselId);
+  if (!vessel) return;
+  const equipment = getVesselEquipment(vessel);
+  if (!equipment.length) {
+    showToast('This vessel has no equipment defined yet. Add engines/generators first.', 'error');
+    openManageEquipmentModal();
+    return;
+  }
+
+  document.getElementById('hours-form').reset();
+  document.getElementById('hours-vessel-id').value = vessel.id;
+  document.getElementById('hours-modal-subtitle').textContent = vessel.name;
+  document.getElementById('hours-date').value = TODAY.toISOString().split('T')[0];
+  document.getElementById('hours-signoff').value = vessel.chief || '';
+
+  document.getElementById('hours-fields-grid').innerHTML = equipment.map(f => {
+    const current = vessel.currentRunningHours?.[f.key] ?? 0;
+    return `
+      <div class="flex items-center gap-3">
+        <label class="w-32 shrink-0 text-xs text-gray-600 truncate" title="${f.label}">${f.label}</label>
+        <span class="text-xs text-gray-400 w-24 shrink-0 mono">was ${current.toLocaleString()}</span>
+        <input type="number" id="hours-input-${f.key}" data-current="${current}" data-abbr="${f.abbr || f.label}" min="${current}" step="1"
+          value="${current}" oninput="updateHoursRunSummary()"
+          class="form-input flex-1 px-3 py-1.5 rounded-lg text-sm mono">
+      </div>`;
+  }).join('');
+
+  updateHoursRunSummary();
+  openModal('hours-modal');
+}
+
+function updateHoursRunSummary() {
+  const inputs = [...document.querySelectorAll('#hours-fields-grid input[id^="hours-input-"]')];
+  const lines = inputs.map(input => {
+    const current = parseFloat(input.dataset.current) || 0;
+    const next = parseFloat(input.value);
+    if (!Number.isFinite(next)) return null;
+    const run = next - current;
+    if (run === 0) return null;
+    return `${input.dataset.abbr} +${run.toLocaleString()} hrs`;
+  }).filter(Boolean);
+  const el = document.getElementById('hours-run-summary');
+  el.textContent = lines.length ? `Since last reading: ${lines.join(' · ')}` : 'No change from current readings yet.';
+}
+
+async function submitLogHours(e) {
+  e.preventDefault();
+  const vesselId = document.getElementById('hours-vessel-id').value;
+  const vessel   = state.vessels.find(v => v.id === vesselId);
+  if (!vessel) return;
+  const equipment = getVesselEquipment(vessel);
+
+  const readingDate = document.getElementById('hours-date').value;
+  const signoff      = document.getElementById('hours-signoff').value.trim();
+  if (!readingDate || !signoff) { showToast('Please complete all required fields.', 'error'); return; }
+
+  const readings = {};
+  const runs = {};
+  for (const f of equipment) {
+    const input = document.getElementById(`hours-input-${f.key}`);
+    if (!input) continue;
+    const current = parseFloat(input.dataset.current) || 0;
+    const next = parseFloat(input.value);
+    if (!Number.isFinite(next) || next < 0) {
+      showToast(`Enter a valid reading for ${f.label}.`, 'error'); return;
+    }
+    if (next < current) {
+      showToast(`${f.label} reading (${next}) can't be lower than the current value (${current}).`, 'error');
+      return;
+    }
+    readings[f.key] = next;
+    runs[f.key] = +(next - current).toFixed(2);
+  }
+
+  if (Object.values(runs).every(r => r === 0)) {
+    if (!confirm('No hours changed since the last reading for any unit. Save anyway?')) return;
+  }
+
+  const logEntry = {
+    type: 'running-hours',
+    vesselId, vesselName: vessel.name,
+    readingDate, signoff,
+    previousReadings: { ...vessel.currentRunningHours },
+    newReadings: readings,
+    hoursRun: runs,
+    loggedAt: new Date().toISOString(),
+  };
+
+  try {
+    await window.FGDB.updateVessel(vesselId, { currentRunningHours: { ...vessel.currentRunningHours, ...readings } });
+    await window.FGDB.addLog(logEntry);
+    closeModal('hours-modal');
+    const totalRun = Object.values(runs).reduce((a, b) => a + b, 0);
+    showToast(`✓ Running hours updated (+${totalRun.toLocaleString()} hrs total). Maintenance due dates recalculated.`, 'success');
+  } catch (err) {
+    console.error('FleetGuard: log running hours failed', err);
+    showToast('Failed to save running hours. Check your connection and try again.', 'error');
+  }
+}
+
+// ── MANAGE EQUIPMENT (per-vessel engines / generators) ─────────
+// Working list while the modal is open: [{ key, label, abbr, hours, isNew }]
+let _equipStaged = [];
+let _equipVesselId = null;
+
+function openManageEquipmentModal() {
+  const vessel = state.vessels.find(v => v.id === currentVesselId);
+  if (!vessel) return;
+  _equipVesselId = vessel.id;
+  _equipStaged = getVesselEquipment(vessel).map(f => ({
+    key: f.key, label: f.label, abbr: f.abbr || '',
+    hours: vessel.currentRunningHours?.[f.key] ?? 0,
+    isNew: false,
+  }));
+  document.getElementById('equip-modal-subtitle').textContent = vessel.name;
+  renderEquipRows();
+  openModal('manage-equipment-modal');
+}
+
+function renderEquipRows() {
+  const vessel = state.vessels.find(v => v.id === _equipVesselId);
+  const list = document.getElementById('equip-rows-list');
+  if (!_equipStaged.length) {
+    list.innerHTML = '<div class="py-4 text-center text-gray-400 text-sm">No equipment yet — add an engine or generator below.</div>';
+    return;
+  }
+  list.innerHTML = _equipStaged.map((eq, i) => {
+    const linkedCount = vessel ? state.tasks.filter(t => t.vesselId === vessel.id && t.component === eq.key).length : 0;
+    return `
+      <div class="flex items-center gap-2 p-2 rounded-lg border border-gray-200">
+        <div class="flex-1 grid grid-cols-2 gap-2">
+          <input type="text" placeholder="e.g., Main Engine 1" value="${eq.label.replace(/"/g,'&quot;')}"
+            oninput="updateEquipRow(${i},'label',this.value)"
+            class="form-input px-2 py-1.5 rounded-lg text-sm">
+          <input type="text" placeholder="Abbr. e.g. ME1" value="${eq.abbr.replace(/"/g,'&quot;')}" maxlength="6"
+            oninput="updateEquipRow(${i},'abbr',this.value)"
+            class="form-input px-2 py-1.5 rounded-lg text-sm mono">
+        </div>
+        ${eq.isNew ? `
+          <input type="number" min="0" step="1" placeholder="Start hrs" value="${eq.hours}"
+            oninput="updateEquipRow(${i},'hours',this.value)"
+            class="form-input w-24 px-2 py-1.5 rounded-lg text-sm mono" title="Initial running hours">
+        ` : `
+          <span class="w-24 text-xs text-gray-400 mono text-right pr-1">${eq.hours.toLocaleString()} hrs</span>
+        `}
+        <button type="button" onclick="removeEquipRow(${i})" title="${linkedCount ? `${linkedCount} task(s) use this — will be unassigned` : 'Remove'}"
+          class="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors shrink-0">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+        </button>
+      </div>
+      ${linkedCount ? `<div class="text-xs text-amber-600 -mt-1 ml-2">${linkedCount} maintenance task${linkedCount!==1?'s':''} currently tracked against this unit.</div>` : ''}
+    `;
+  }).join('');
+}
+
+function updateEquipRow(i, field, value) {
+  if (!_equipStaged[i]) return;
+  _equipStaged[i][field] = field === 'hours' ? (parseFloat(value) || 0) : value;
+}
+
+function addEquipmentRow() {
+  _equipStaged.push({ key: newEquipmentKey(), label: '', abbr: '', hours: 0, isNew: true });
+  renderEquipRows();
+}
+
+function removeEquipRow(i) {
+  const eq = _equipStaged[i];
+  if (!eq) return;
+  const vessel = state.vessels.find(v => v.id === _equipVesselId);
+  const linkedCount = vessel ? state.tasks.filter(t => t.vesselId === vessel.id && t.component === eq.key).length : 0;
+  if (linkedCount) {
+    if (!confirm(`${linkedCount} maintenance task${linkedCount!==1?'s':''} currently track "${eq.label || 'this unit'}". Removing it will unassign ${linkedCount!==1?'them':'it'} — you'll need to edit ${linkedCount!==1?'those tasks':'that task'} to pick a different unit. Continue?`)) return;
+  }
+  _equipStaged.splice(i, 1);
+  renderEquipRows();
+}
+
+async function submitManageEquipment() {
+  const vessel = state.vessels.find(v => v.id === _equipVesselId);
+  if (!vessel) return;
+
+  // Validate labels
+  for (const eq of _equipStaged) {
+    if (!eq.label.trim()) { showToast('Every unit needs a name.', 'error'); return; }
+  }
+
+  const finalEquipment = _equipStaged.map(eq => ({
+    key: eq.key,
+    label: eq.label.trim(),
+    abbr: (eq.abbr || eq.label.trim().slice(0,4)).trim().toUpperCase(),
+  }));
+
+  // Keep existing hours for retained units, seed new units at their entered
+  // starting value, and drop hours for units that were removed.
+  const finalHours = {};
+  _equipStaged.forEach(eq => {
+    finalHours[eq.key] = eq.isNew ? (eq.hours || 0) : (vessel.currentRunningHours?.[eq.key] ?? 0);
+  });
+
+  // Any task pointing at a component key that's no longer in the equipment
+  // list gets unassigned (component: null) rather than silently orphaned.
+  const keptKeys = new Set(finalEquipment.map(eq => eq.key));
+  const affectedTasks = state.tasks.filter(t => t.vesselId === vessel.id && t.component && !keptKeys.has(t.component));
+
+  try {
+    if (affectedTasks.length) {
+      const batch = window.FGDB.newBatch();
+      affectedTasks.forEach(t => batch.update(window.FGDB.taskRef(t.id), { component: null }));
+      await batch.commit();
+    }
+    await window.FGDB.updateVessel(vessel.id, { equipment: finalEquipment, currentRunningHours: finalHours });
+    closeModal('manage-equipment-modal');
+    showToast(`✓ Equipment updated for ${vessel.name}.${affectedTasks.length ? ` ${affectedTasks.length} task(s) need a new unit assigned.` : ''}`, 'success');
+  } catch (err) {
+    console.error('FleetGuard: manage equipment failed', err);
+    showToast('Failed to save equipment. Check your connection and try again.', 'error');
   }
 }
 
@@ -2355,7 +2870,7 @@ document.querySelectorAll('.modal-overlay').forEach(o => {
   });
 });
 document.addEventListener('keydown', e => {
-  if (e.key==='Escape') ['closeout-modal','add-task-modal','edit-task-modal','add-vessel-modal','edit-vessel-modal','copy-pms-modal','history-modal'].forEach(id=>{
+  if (e.key==='Escape') ['closeout-modal','add-task-modal','edit-task-modal','add-vessel-modal','edit-vessel-modal','hours-modal','manage-equipment-modal','copy-pms-modal','history-modal'].forEach(id=>{
     const m=document.getElementById(id); if(!m.classList.contains('hidden')) closeModal(id);
   });
 });
@@ -2379,6 +2894,7 @@ function openEditTaskModal(taskId) {
   // Populate vessel dropdown
   const vesselSel = document.getElementById('edit-task-vessel');
   vesselSel.innerHTML = state.vessels.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
+  vesselSel.onchange = () => { refreshTaskEquipField('edit'); refreshEditNextDue(); };
 
   document.getElementById('edit-task-id').value            = taskId;
   vesselSel.value                                          = task.vesselId;
@@ -2389,12 +2905,17 @@ function openEditTaskModal(taskId) {
   document.getElementById('edit-task-last-done').value     = task.lastDone;
   document.getElementById('edit-task-priority').value      = task.priority || 'normal';
   document.getElementById('edit-task-notes').value         = task.notes || '';
+  document.getElementById('edit-task-last-done-hours').value = task.lastDoneHours ?? '';
 
   editTaskChecklist = [...(task.checklist || [])];
   document.getElementById('edit-task-checklist-input').value = '';
   renderChecklistBuilder('edit');
 
   updateEditIntervalLabel();
+  if (task.intervalType === 'hours') {
+    refreshTaskEquipField('edit');
+    document.getElementById('edit-task-component').value = task.component || '';
+  }
   refreshEditNextDue();
 
   // Live-update next-due preview when date/interval/frequency changes
@@ -2410,6 +2931,8 @@ function updateEditIntervalLabel() {
   const t = document.getElementById('edit-task-interval-type').value;
   document.getElementById('edit-interval-unit-label').textContent =
     { days: '(days)', months: '(months)', hours: '(hours)' }[t] || '';
+  document.getElementById('edit-task-equip-section').classList.toggle('hidden', t !== 'hours');
+  if (t === 'hours') refreshTaskEquipField('edit');
 }
 
 function refreshEditNextDue() {
@@ -2441,6 +2964,19 @@ async function submitEditTask(e) {
     notes:        document.getElementById('edit-task-notes').value.trim(),
     checklist:    [...editTaskChecklist],
   };
+
+  if (updated.intervalType === 'hours') {
+    const component = document.getElementById('edit-task-component').value;
+    const lastDoneHours = parseFloat(document.getElementById('edit-task-last-done-hours').value);
+    if (!component) { showToast('Select which equipment this task tracks.', 'error'); return; }
+    if (!Number.isFinite(lastDoneHours) || lastDoneHours < 0) { showToast('Enter the hour-meter reading at last done.', 'error'); return; }
+    updated.component = component;
+    updated.lastDoneHours = lastDoneHours;
+  } else {
+    updated.component = null;
+    updated.lastDoneHours = null;
+  }
+
   updated.nextDue = computeNextDue(updated.lastDone, updated.intervalType, updated.frequency);
 
   try {
@@ -2650,8 +3186,12 @@ async function executeCopyPMS() {
     // locally, then committed together in a single round-trip.
     const batch = window.FGDB.newBatch();
     let totalAdded = 0;
+    let unassignedCount = 0;
 
     targetIds.forEach(targetId => {
+      const targetVessel = state.vessels.find(v => v.id === targetId);
+      const targetEquipKeys = new Set(getVesselEquipment(targetVessel).map(f => f.key));
+
       if (mode === 'replace') {
         state.tasks.filter(t => t.vesselId === targetId).forEach(t => batch.delete(window.FGDB.taskRef(t.id)));
         state.logs.filter(l => l.vesselId === targetId).forEach(l => batch.delete(window.FGDB.logRef(l.id)));
@@ -2662,6 +3202,11 @@ async function executeCopyPMS() {
           const exists = state.tasks.some(t => t.vesselId === targetId && t.name.toLowerCase() === src.name.toLowerCase());
           if (exists) return;
         }
+        // A copied hours-based task only keeps its equipment link if the
+        // target vessel has a unit with that same key — otherwise it's
+        // unassigned rather than silently tracking the wrong engine.
+        const carriesOverComponent = src.intervalType === 'hours' && src.component && targetEquipKeys.has(src.component);
+        if (src.intervalType === 'hours' && !carriesOverComponent) unassignedCount++;
         batch.set(window.FGDB.newTaskRef(), {
           vesselId: targetId,
           category: src.category,
@@ -2674,7 +3219,7 @@ async function executeCopyPMS() {
           notes: src.notes || '',
           history: [],
           checklist: [...(src.checklist || [])],
-          component: src.component ?? null,
+          component: carriesOverComponent ? src.component : null,
           lastDoneHours: src.lastDoneHours ?? null,
         });
         totalAdded++;
@@ -2684,7 +3229,10 @@ async function executeCopyPMS() {
     await batch.commit();
     closeModal('copy-pms-modal');
     const vesselNames = targetBtns.map(b => b.textContent.trim()).join(', ');
-    showToast(`✓ ${totalAdded} task${totalAdded!==1?'s':''} copied to ${vesselNames}.`, 'success');
+    const unassignedNote = unassignedCount
+      ? ` ${unassignedCount} running-hours task${unassignedCount!==1?'s':''} copied without an equipment match — assign a unit on the target vessel.`
+      : '';
+    showToast(`✓ ${totalAdded} task${totalAdded!==1?'s':''} copied to ${vesselNames}.${unassignedNote}`, 'success');
   } catch (err) {
     console.error('FleetGuard: copy PMS failed', err);
     showToast('Failed to copy tasks. Check your connection and try again.', 'error');
