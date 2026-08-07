@@ -85,6 +85,14 @@
   .task-row.coming-due { border-left: 3px solid #eab308; }
   .task-row.compliant  { border-left: 3px solid #22c55e; }
   .task-row.unassigned { border-left: 3px solid #94a3b8; }
+  .cat-safety        { background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; }
+  .cat-propulsion    { background:#faf5ff; color:#7e22ce; border:1px solid #e9d5ff; }
+  .cat-electrical    { background:#fefce8; color:#a16207; border:1px solid #fde68a; }
+  .cat-hull          { background:#f0fdfa; color:#0f766e; border:1px solid #99f6e4; }
+  .cat-navigation    { background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; }
+  .cat-environmental { background:#f0fdf4; color:#15803d; border:1px solid #bbf7d0; }
+  .cat-deck          { background:#fff7ed; color:#c2410c; border:1px solid #fed7aa; }
+  .cat-hotel         { background:#fdf4ff; color:#a21caf; border:1px solid #f0abfc; }
   .pulse-red { animation: pulseRed 2s ease-in-out infinite; }
   @keyframes pulseRed { 0%,100%{opacity:1} 50%{opacity:.55} }
 </style>
@@ -123,7 +131,7 @@
 <!-- ===== VESSEL DASHBOARD (shown after login) ===== -->
 <div id="portal-app" class="hidden min-h-screen">
   <header class="bg-white border-b border-gray-200 sticky top-0 z-20">
-    <div class="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
+    <div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
       <div class="flex items-center gap-2.5">
         <span id="portal-vessel-icon" class="text-2xl"></span>
         <div>
@@ -138,7 +146,7 @@
     </div>
   </header>
 
-  <main class="max-w-3xl mx-auto px-4 py-5 space-y-5">
+  <main class="max-w-5xl mx-auto px-4 py-5 space-y-5">
     <div id="portal-kpi-strip" class="grid grid-cols-3 gap-3"></div>
     <div id="portal-hours-panel" class="bg-white rounded-xl border border-gray-200 shadow-sm p-4"></div>
 
@@ -152,7 +160,33 @@
           <option value="compliant">Compliant</option>
         </select>
       </div>
-      <div id="portal-task-list" class="space-y-2"></div>
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
+          <h3 id="portal-table-title" class="text-sm font-semibold text-gray-700">Maintenance Register</h3>
+          <span id="portal-task-count" class="text-xs text-gray-400 mono"></span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-xs text-gray-500 uppercase tracking-wider bg-gray-50 border-b border-gray-100">
+                <th class="px-4 py-3 text-left font-semibold">Category</th>
+                <th class="px-4 py-3 text-left font-semibold">Task Description</th>
+                <th class="px-4 py-3 text-left font-semibold">Interval</th>
+                <th class="px-4 py-3 text-left font-semibold">Last Done</th>
+                <th class="px-4 py-3 text-left font-semibold">Next Due</th>
+                <th class="px-4 py-3 text-left font-semibold">Days Left</th>
+                <th class="px-4 py-3 text-left font-semibold">Status</th>
+                <th class="px-4 py-3 text-left font-semibold">Action</th>
+              </tr>
+            </thead>
+            <tbody id="portal-task-table-body"></tbody>
+          </table>
+        </div>
+        <div id="portal-task-empty" class="hidden py-14 text-center text-gray-400">
+          <svg class="w-10 h-10 mx-auto mb-2 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+          <p class="text-sm">No tasks match this filter.</p>
+        </div>
+      </div>
     </div>
   </main>
 </div>
@@ -400,6 +434,23 @@ function intervalLabel(intervalType, frequency) {
 }
 function escapeHtml(str) { return String(str ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function checklistLetter(i) { let n=i,s=''; do { s=String.fromCharCode(97+(n%26))+s; n=Math.floor(n/26)-1; } while(n>=0); return s; }
+const CATEGORY_CLASSES = {
+  'Safety / Drills':            'cat-safety',
+  'Propulsion / Main Engine':   'cat-propulsion',
+  'Electrical / Power':         'cat-electrical',
+  'Hull / Structure':           'cat-hull',
+  'Navigation / Bridge':        'cat-navigation',
+  'Environmental / Compliance': 'cat-environmental',
+  'Deck / Mooring':             'cat-deck',
+  'Hotel / Accommodations':     'cat-hotel',
+  'HVAC / Refrigeration':       'cat-propulsion',
+  'Cargo / Ballast':            'cat-hull',
+};
+function priorityBadge(p) {
+  if (p === 'critical') return '<span class="text-xs font-bold text-red-600 uppercase tracking-wide">CRIT</span>';
+  if (p === 'high')     return '<span class="text-xs font-semibold text-amber-600">High</span>';
+  return '';
+}
 
 function getVesselEquipment(vessel) {
   return (vessel && Array.isArray(vessel.equipment) && vessel.equipment.length) ? vessel.equipment : [];
@@ -488,33 +539,68 @@ function renderPortalHours() {
   `;
 }
 
-// ── RENDER: TASK LIST ───────────────────────────────────────────
+// ── RENDER: TASK LIST (mirrors the office Maintenance Register table) ──
 function renderPortalTasks() {
   const filter = document.getElementById('portal-status-filter').value;
   let tasks = [...portalTasks];
   if (filter !== 'all') tasks = tasks.filter(t => getStatus(t) === filter);
-  tasks.sort((a, b) => {
-    const order = { overdue: 0, 'coming-due': 1, unassigned: 2, compliant: 3, unknown: 4 };
-    return (order[getStatus(a)] ?? 9) - (order[getStatus(b)] ?? 9);
-  });
 
-  const list = document.getElementById('portal-task-list');
-  if (!tasks.length) {
-    list.innerHTML = `<div class="py-8 text-center text-gray-400 text-sm bg-white rounded-xl border border-gray-200">No tasks match this filter.</div>`;
-    return;
-  }
-  list.innerHTML = tasks.map(t => `
-    <div class="task-row ${rowClass(t)} bg-white rounded-xl border border-gray-200 shadow-sm p-3.5 flex items-center justify-between gap-3">
-      <div class="min-w-0">
-        <div class="text-sm font-semibold text-gray-900 truncate">${escapeHtml(t.name)}</div>
-        <div class="text-xs text-gray-400 mt-0.5">${escapeHtml(t.category)} · Every ${intervalLabel(t.intervalType, t.frequency)} · Last done ${formatDate(t.lastDone)}</div>
-      </div>
-      <div class="flex items-center gap-3 shrink-0">
-        ${statusBadge(t)}
-        <button onclick="openCloseOut('${t.id}')" class="px-3 py-1.5 rounded-lg btn-primary text-xs font-semibold shadow-sm whitespace-nowrap">Report</button>
-      </div>
-    </div>
-  `).join('');
+  document.getElementById('portal-task-count').textContent = `${tasks.length} task${tasks.length!==1?'s':''}`;
+  document.getElementById('portal-table-title').textContent = `${portalVessel?.name || ''} — Maintenance Register`;
+
+  const tbody = document.getElementById('portal-task-table-body');
+  const empty = document.getElementById('portal-task-empty');
+  if (!tasks.length) { tbody.innerHTML = ''; empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+
+  // Group by category, categories in a stable order (order tasks first
+  // appear in), each task within a category sorted most-urgent first.
+  const order = { overdue: 0, 'coming-due': 1, unassigned: 2, compliant: 3, unknown: 4 };
+  const grouped = {};
+  tasks.forEach(t => { if (!grouped[t.category]) grouped[t.category] = []; grouped[t.category].push(t); });
+  Object.values(grouped).forEach(list => list.sort((a, b) => (order[getStatus(a)] ?? 9) - (order[getStatus(b)] ?? 9)));
+
+  let html = '';
+  Object.entries(grouped).forEach(([cat, catTasks]) => {
+    const catClass = CATEGORY_CLASSES[cat] || '';
+    html += `<tr class="category-group-header">
+      <td colspan="8" class="px-4 py-2 border-b border-gray-100 bg-gray-50">
+        <span class="inline-block px-2.5 py-1 rounded-md text-xs font-bold ${catClass}">${escapeHtml(cat)}</span>
+        <span class="ml-2 text-xs text-gray-400">${catTasks.length} task${catTasks.length!==1?'s':''}</span>
+      </td>
+    </tr>`;
+    catTasks.forEach(t => {
+      const days = daysUntil(t.nextDue);
+      const daysDisplay = days === null ? '—' :
+        days < 0  ? `<span class="text-red-600 font-semibold">${Math.abs(days)}d ago</span>` :
+        days === 0 ? '<span class="text-amber-600 font-semibold">Today</span>' :
+        `<span class="${days<=14?'text-amber-600':'text-gray-600'}">${days}d</span>`;
+      html += `
+        <tr class="task-row ${rowClass(t)} bg-white" onclick="openCloseOut('${t.id}')">
+          <td class="px-4 py-2.5 pl-8"></td>
+          <td class="px-4 py-2.5">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-sm text-gray-800 font-medium">${escapeHtml(t.name)}</span>
+              ${priorityBadge(t.priority)}
+              ${t.checklist && t.checklist.length ? `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 text-xs font-medium">☑ ${t.checklist.length}</span>` : ''}
+              ${(t.history||[]).length ? `<span class="text-xs text-gray-400 mono">(${t.history.length}×)</span>` : ''}
+            </div>
+            ${t.notes ? `<div class="text-xs text-gray-400 mt-0.5">${escapeHtml(t.notes)}</div>` : ''}
+          </td>
+          <td class="px-4 py-2.5 mono text-xs text-gray-500">${intervalLabel(t.intervalType,t.frequency)}</td>
+          <td class="px-4 py-2.5 mono text-xs text-gray-500">${formatDate(t.lastDone)}</td>
+          <td class="px-4 py-2.5 mono text-xs text-gray-700 font-medium">${formatDate(t.nextDue)}</td>
+          <td class="px-4 py-2.5 text-xs mono">${daysDisplay}</td>
+          <td class="px-4 py-2.5">${statusBadge(t)}</td>
+          <td class="px-4 py-2.5">
+            <button onclick="event.stopPropagation();openCloseOut('${t.id}')"
+              class="px-2.5 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors whitespace-nowrap">Report</button>
+          </td>
+        </tr>
+      `;
+    });
+  });
+  tbody.innerHTML = html;
 }
 
 // ── MODALS ───────────────────────────────────────────────────
