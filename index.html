@@ -524,6 +524,15 @@
             class="form-input w-full px-3 py-2 rounded-lg text-sm" autocomplete="off">
         </div>
       </div>
+      <!-- Checklist Sub-Items — shown only when the task has defined sub-items -->
+      <div id="closeout-checklist-section" class="hidden">
+        <div class="flex items-center justify-between mb-1.5">
+          <label class="text-xs font-semibold text-gray-600">Checklist Items</label>
+          <span id="closeout-checklist-progress" class="text-xs text-gray-400"></span>
+        </div>
+        <div id="closeout-checklist-list" class="space-y-1.5 p-2 rounded-lg bg-gray-50 border border-gray-200 max-h-56 overflow-y-auto"></div>
+      </div>
+
       <div>
         <label class="block text-xs font-semibold text-gray-600 mb-1.5">Work Done / Details of Inspection <span class="text-red-500">*</span></label>
         <textarea id="closeout-work-done" required rows="3"
@@ -627,6 +636,22 @@
         <label class="block text-xs font-semibold text-gray-600 mb-1.5">Task Name / Description <span class="text-red-500">*</span></label>
         <input type="text" id="new-task-name" required placeholder="e.g., Fire Pump Weekly Test"
           class="form-input w-full px-3 py-2 rounded-lg text-sm">
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-1.5">
+          <label class="block text-xs font-semibold text-gray-600">Checklist Sub-Items <span class="text-gray-400 font-normal">(optional)</span></label>
+          <span class="text-xs text-gray-400">e.g., Life Preservers a) Reflective Tape, b) Approved…</span>
+        </div>
+        <div class="flex gap-2 mb-2">
+          <input type="text" id="new-task-checklist-input" placeholder="e.g., Properly Equipped with Reflective Tape"
+            class="form-input flex-1 px-3 py-2 rounded-lg text-sm"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addChecklistItem('new');}">
+          <button type="button" onclick="addChecklistItem('new')"
+            class="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors whitespace-nowrap">
+            + Add Item
+          </button>
+        </div>
+        <div id="new-task-checklist-list" class="space-y-1 max-h-40 overflow-y-auto"></div>
       </div>
       <div class="grid grid-cols-3 gap-4">
         <div>
@@ -787,6 +812,23 @@
       <div>
         <label class="block text-xs font-semibold text-gray-600 mb-1.5">Task Name / Description <span class="text-red-500">*</span></label>
         <input type="text" id="edit-task-name" required class="form-input w-full px-3 py-2 rounded-lg text-sm">
+      </div>
+
+      <div>
+        <div class="flex items-center justify-between mb-1.5">
+          <label class="block text-xs font-semibold text-gray-600">Checklist Sub-Items <span class="text-gray-400 font-normal">(optional)</span></label>
+          <span class="text-xs text-gray-400">e.g., Life Preservers a) Reflective Tape, b) Approved…</span>
+        </div>
+        <div class="flex gap-2 mb-2">
+          <input type="text" id="edit-task-checklist-input" placeholder="e.g., Properly Equipped with Reflective Tape"
+            class="form-input flex-1 px-3 py-2 rounded-lg text-sm"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addChecklistItem('edit');}">
+          <button type="button" onclick="addChecklistItem('edit')"
+            class="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors whitespace-nowrap">
+            + Add Item
+          </button>
+        </div>
+        <div id="edit-task-checklist-list" class="space-y-1 max-h-40 overflow-y-auto"></div>
       </div>
 
       <div class="grid grid-cols-3 gap-4">
@@ -1102,6 +1144,7 @@ function getSeedData() {
     ['v001','Safety / Drills',           'Man Overboard (MOB) Drill',                'days', 30,  d(-10),'high'],
     ['v001','Safety / Drills',           'Lifeboat Lowering & Engine Test',          'days', 90,  d(-88),'critical'],
     ['v001','Safety / Drills',           'EPIRB Battery & Registration Check',       'days', 365, d(-200),'high'],
+    ['v001','Safety / Drills',           'Inspect Life Preservers',                  'days', 30,  d(-25),'high'],
     ['v001','Environmental / Compliance','SOx / ECA Fuel Switchover Log Review',     'days', 30,  d(-31),'high'],
     ['v001','Environmental / Compliance','Oil Record Book Audit (Part II)',           'days', 30,  d(-5), 'normal'],
     ['v001','Environmental / Compliance','Sewage Treatment Plant Inspection',        'days', 90,  d(-60),'normal'],
@@ -1147,6 +1190,22 @@ function getSeedData() {
     ['v003','Navigation / Bridge',       'GMDSS Equipment Self-Test & Log',          'days', 1,   d(-1), 'critical'],
   ];
 
+  // Optional lettered sub-items for select tasks, matching the paper
+  // PMS checklist's lettered sub-parts (e.g. "B.1 Inspect Life
+  // Preservers a)-h)"). Keyed by task name.
+  const checklistsByName = {
+    'Inspect Life Preservers': [
+      'Properly Equipped with Reflective Tape',
+      'Approved for Intended Service',
+      'PFD Lights',
+      'Properly Marked',
+      'Physically Serviceable',
+      'Properly Stowed and Labeled',
+      'Donning Instruction',
+      'Adequate Number Onboard',
+    ],
+  };
+
   // Hours-based tasks: [vesselId, category, name, frequency, component, lastDoneHours, priority]
   const hoursRaw = [
     ['v001','Propulsion / Main Engine','ME1 — Lube Oil Change',         250, 'me1', 14100,'high'],
@@ -1171,6 +1230,7 @@ function getSeedData() {
       intervalType: r[3], frequency: r[4], lastDone: r[5], priority: r[6],
       nextDue: computeNextDue(r[5], r[3], r[4]),
       history: [], notes: '',
+      checklist: checklistsByName[r[2]] || [],
       // hours fields not applicable
       component: null, lastDoneHours: null,
     })),
@@ -1181,7 +1241,7 @@ function getSeedData() {
       component: r[4], lastDoneHours: r[5], priority: r[6],
       // Calendar fields not applicable for hours tasks
       lastDone: null, nextDue: null,
-      history: [], notes: '',
+      history: [], notes: '', checklist: [],
     })),
   ];
 
@@ -1643,6 +1703,7 @@ function renderVesselTable() {
             <div class="flex items-center gap-2 flex-wrap">
               <span class="text-sm text-gray-800 font-medium">${t.name}</span>
               ${priorityBadge(t.priority)}
+              ${t.checklist&&t.checklist.length?`<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 text-xs font-medium">☑ ${t.checklist.length}</span>`:''}
               ${t.history.length?`<span class="text-xs text-gray-400 mono">(${t.history.length}×)</span>`:''}
             </div>
             ${t.notes?`<div class="text-xs text-gray-400 mt-0.5">${t.notes}</div>`:''}
@@ -1700,6 +1761,9 @@ function openCloseOut(taskId) {
   drillSection.classList.toggle('hidden', !isDrill);
   clearAttendees();
 
+  // Show/hide checklist sub-items section
+  renderCloseoutChecklist(task);
+
   document.getElementById('closeout-task-banner').innerHTML = `
     <div><div class="text-gray-400 mb-0.5">Task</div><div class="font-semibold text-gray-800">${task.name}</div></div>
     <div><div class="text-gray-400 mb-0.5">Interval</div><div class="font-semibold text-gray-800">${intervalLabel(task.intervalType,task.frequency)}</div></div>
@@ -1709,6 +1773,36 @@ function openCloseOut(taskId) {
   updateNextDuePreview(task);
   document.getElementById('closeout-date').oninput = () => updateNextDuePreview(task);
   openModal('closeout-modal');
+}
+
+function renderCloseoutChecklist(task) {
+  const section = document.getElementById('closeout-checklist-section');
+  const list    = document.getElementById('closeout-checklist-list');
+  const items   = task.checklist || [];
+  if (!items.length) {
+    section.classList.add('hidden');
+    list.innerHTML = '';
+    return;
+  }
+  section.classList.remove('hidden');
+  list.innerHTML = items.map((text, i) => `
+    <label class="flex items-start gap-2 py-1 cursor-pointer">
+      <input type="checkbox" class="checklist-item-cb mt-0.5 w-4 h-4 accent-green-600 shrink-0"
+        data-text="${escapeHtml(text)}" onchange="updateChecklistProgress()">
+      <span class="flex-1 text-sm text-gray-700"><span class="mono text-xs text-gray-400 mr-1">${checklistLetter(i)})</span>${escapeHtml(text)}</span>
+    </label>
+  `).join('');
+  updateChecklistProgress();
+}
+function updateChecklistProgress() {
+  const boxes   = [...document.querySelectorAll('#closeout-checklist-list .checklist-item-cb')];
+  const checked = boxes.filter(b => b.checked).length;
+  const el = document.getElementById('closeout-checklist-progress');
+  if (el) el.textContent = boxes.length ? `${checked} of ${boxes.length} verified` : '';
+}
+function getChecklistResults() {
+  return [...document.querySelectorAll('#closeout-checklist-list .checklist-item-cb')]
+    .map(b => ({ text: b.dataset.text, ok: b.checked }));
 }
 
 function updateNextDuePreview(task) {
@@ -1738,6 +1832,12 @@ async function submitCloseOut(e) {
     return;
   }
 
+  const checklistResults = getChecklistResults();
+  if (checklistResults.length && checklistResults.some(r => !r.ok)) {
+    const unverified = checklistResults.filter(r => !r.ok).length;
+    if (!confirm(`${unverified} checklist item${unverified!==1?'s are':' is'} not checked off. Submit anyway?`)) return;
+  }
+
   const task = state.tasks.find(t => t.id === taskId);
   if (!task) return;
   const newNextDue = computeNextDue(date, task.intervalType, task.frequency);
@@ -1752,6 +1852,7 @@ async function submitCloseOut(e) {
     completionDate: date, signoff, workDone,
     parts: parts || 'None', condition,
     attendees: isDrill ? attendees : [],
+    checklistResults,
     previousNextDue: task.nextDue, newNextDue,
     loggedAt: new Date().toISOString(),
   };
@@ -1811,6 +1912,54 @@ function updateAttendeeCount() {
   document.getElementById('attendee-count').textContent = `${n} attendee${n !== 1 ? 's' : ''} listed`;
 }
 
+// ── CHECKLIST SUB-ITEMS (used by Add Task, Edit Task & Close-Out) ─
+// A task can optionally carry a `checklist` array of plain-text
+// sub-items (e.g. Life Preservers a) Reflective Tape, b) Approved…)
+// mirroring the lettered sub-parts on the paper PMS checklist.
+let newTaskChecklist  = [];
+let editTaskChecklist = [];
+
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function checklistLetter(i) {
+  // a, b, c … z, then aa, ab … (extremely unlikely to be needed, but safe)
+  let n = i, s = '';
+  do { s = String.fromCharCode(97 + (n % 26)) + s; n = Math.floor(n / 26) - 1; } while (n >= 0);
+  return s;
+}
+function addChecklistItem(mode) {
+  const inputId = mode === 'new' ? 'new-task-checklist-input' : 'edit-task-checklist-input';
+  const input = document.getElementById(inputId);
+  const text = input.value.trim();
+  if (!text) return;
+  (mode === 'new' ? newTaskChecklist : editTaskChecklist).push(text);
+  input.value = '';
+  input.focus();
+  renderChecklistBuilder(mode);
+}
+function removeChecklistItem(mode, idx) {
+  const arr = mode === 'new' ? newTaskChecklist : editTaskChecklist;
+  arr.splice(idx, 1);
+  renderChecklistBuilder(mode);
+}
+function renderChecklistBuilder(mode) {
+  const arr    = mode === 'new' ? newTaskChecklist : editTaskChecklist;
+  const listEl = document.getElementById(mode === 'new' ? 'new-task-checklist-list' : 'edit-task-checklist-list');
+  if (!listEl) return;
+  if (!arr.length) {
+    listEl.innerHTML = '<p class="text-xs text-gray-400 italic px-1">No sub-items — task will close out as a single line item.</p>';
+    return;
+  }
+  listEl.innerHTML = arr.map((text, i) => `
+    <div class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-gray-50 border border-gray-200 text-sm">
+      <span class="mono text-xs text-gray-400 w-5 shrink-0">${checklistLetter(i)})</span>
+      <span class="flex-1 text-gray-700">${escapeHtml(text)}</span>
+      <button type="button" onclick="removeChecklistItem('${mode}', ${i})" class="text-gray-400 hover:text-red-500 font-bold leading-none px-1" aria-label="Remove item">×</button>
+    </div>
+  `).join('');
+}
+
 // ── ADD TASK ──────────────────────────────────────────────────
 function openAddTaskModal() {
   const sel = document.getElementById('new-task-vessel');
@@ -1821,6 +1970,9 @@ function openAddTaskModal() {
   sel.innerHTML = state.vessels.map(v=>`<option value="${v.id}">${v.name}</option>`).join('');
   if (currentVesselId) sel.value = currentVesselId;
   document.getElementById('new-task-last-done').value = TODAY.toISOString().split('T')[0];
+  newTaskChecklist = [];
+  document.getElementById('new-task-checklist-input').value = '';
+  renderChecklistBuilder('new');
   openModal('add-task-modal');
 }
 function updateIntervalLabel() {
@@ -1843,11 +1995,12 @@ async function submitAddTask(e) {
       vesselId, category, name, intervalType, frequency, lastDone,
       nextDue: computeNextDue(lastDone, intervalType, frequency),
       priority, notes, history: [],
+      checklist: [...newTaskChecklist],
       component: intervalType === 'hours' ? 'me1' : null,
       lastDoneHours: intervalType === 'hours' ? 0 : null,
     });
     closeModal('add-task-modal');
-    showToast(`✓ Task "${name}" added.`,'success');
+    showToast(`✓ Task "${name}" added${newTaskChecklist.length?` with ${newTaskChecklist.length} checklist item${newTaskChecklist.length!==1?'s':''}`:''}.`,'success');
   } catch (err) {
     console.error('FleetGuard: add task failed', err);
     showToast('Failed to add task. Check your connection and try again.', 'error');
@@ -1972,6 +2125,19 @@ function buildHistoryHTML(task, vessel) {
         </div>
       </div>` : '';
 
+    const checklistBlock = log.checklistResults?.length ? `
+      <div>
+        <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Checklist Items (${log.checklistResults.filter(r=>r.ok).length}/${log.checklistResults.length} verified)</div>
+        <div class="space-y-1 bg-gray-50 rounded-lg p-2.5">
+          ${log.checklistResults.map((r,ci) => `
+            <div class="flex items-start gap-2 text-sm">
+              <span class="shrink-0 mt-0.5 ${r.ok?'text-green-600':'text-red-500'}">${r.ok?'✓':'✕'}</span>
+              <span class="flex-1 text-gray-700"><span class="mono text-xs text-gray-400 mr-1">${checklistLetter(ci)})</span>${r.text}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>` : '';
+
     return `
       <div class="log-entry rounded-xl overflow-hidden">
         <!-- Report header bar -->
@@ -2012,6 +2178,7 @@ function buildHistoryHTML(task, vessel) {
             <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Parts Used / Findings</div>
             <div class="text-sm text-gray-700 leading-relaxed bg-gray-50 rounded-lg p-2.5">${log.parts}</div>
           </div>` : ''}
+          ${checklistBlock}
           ${attendeeBlock}
           <div class="text-xs text-gray-400 mono pt-1 border-t border-gray-100">
             Logged: ${new Date(log.loggedAt).toLocaleString('en-GB', {day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})}
@@ -2035,6 +2202,21 @@ function buildPrintReport(task, vessel, logs) {
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:6px">
           ${log.attendees.map(a => `<span style="background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;padding:2px 8px;border-radius:4px;font-size:9pt">${a}</span>`).join('')}
+        </div>
+      </div>` : '';
+
+    const checklistBlock = log.checklistResults?.length ? `
+      <div style="margin-bottom:14px">
+        <div style="font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">
+          Checklist Items (${log.checklistResults.filter(r=>r.ok).length}/${log.checklistResults.length} verified)
+        </div>
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:10px">
+          ${log.checklistResults.map((r,ci) => `
+            <div style="display:flex;gap:6px;font-size:10pt;color:#1f2937;padding:2px 0">
+              <span style="font-weight:700;${r.ok?'color:#15803d':'color:#dc2626'}">${r.ok?'✓':'✕'}</span>
+              <span><span style="color:#9ca3af;font-size:9pt;margin-right:4px">${checklistLetter(ci)})</span>${r.text}</span>
+            </div>
+          `).join('')}
         </div>
       </div>` : '';
 
@@ -2086,6 +2268,7 @@ function buildPrintReport(task, vessel, logs) {
           <div style="border:1px solid #e2e8f0;border-radius:6px;padding:10px;font-size:10pt;line-height:1.6;color:#1f2937;min-height:40px">${log.parts}</div>
         </div>` : ''}
 
+        ${checklistBlock}
         ${attendeeBlock}
 
         <!-- Signature block -->
@@ -2207,6 +2390,10 @@ function openEditTaskModal(taskId) {
   document.getElementById('edit-task-priority').value      = task.priority || 'normal';
   document.getElementById('edit-task-notes').value         = task.notes || '';
 
+  editTaskChecklist = [...(task.checklist || [])];
+  document.getElementById('edit-task-checklist-input').value = '';
+  renderChecklistBuilder('edit');
+
   updateEditIntervalLabel();
   refreshEditNextDue();
 
@@ -2252,6 +2439,7 @@ async function submitEditTask(e) {
     lastDone:     document.getElementById('edit-task-last-done').value,
     priority:     document.getElementById('edit-task-priority').value,
     notes:        document.getElementById('edit-task-notes').value.trim(),
+    checklist:    [...editTaskChecklist],
   };
   updated.nextDue = computeNextDue(updated.lastDone, updated.intervalType, updated.frequency);
 
@@ -2485,6 +2673,7 @@ async function executeCopyPMS() {
           priority: src.priority,
           notes: src.notes || '',
           history: [],
+          checklist: [...(src.checklist || [])],
           component: src.component ?? null,
           lastDoneHours: src.lastDoneHours ?? null,
         });
