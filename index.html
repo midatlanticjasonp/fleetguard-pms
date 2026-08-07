@@ -533,6 +533,14 @@
             class="form-input w-full px-3 py-2 rounded-lg text-sm" autocomplete="off">
         </div>
       </div>
+      <!-- Hour-meter reading — shown only for running-hours tasks, since
+           closing these out resets the hours baseline, not a calendar date -->
+      <div id="closeout-hours-section" class="hidden">
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Hour-Meter Reading at Completion <span class="text-red-500">*</span></label>
+        <input type="number" id="closeout-hours-reading" min="0" step="1"
+          class="form-input w-full px-3 py-2 rounded-lg text-sm mono" placeholder="e.g., 14250">
+        <p class="text-xs text-gray-400 mt-1">This becomes the new baseline the next interval counts from.</p>
+      </div>
       <!-- Checklist Sub-Items — shown only when the task has defined sub-items -->
       <div id="closeout-checklist-section" class="hidden">
         <div class="flex items-center justify-between mb-1.5">
@@ -936,7 +944,7 @@
 
 <!-- ===== EDIT VESSEL MODAL ===== -->
 <div id="edit-vessel-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
-  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-lg shadow-2xl">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
     <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
       <h2 class="text-base font-bold text-gray-900">Edit Vessel Information</h2>
       <button onclick="closeModal('edit-vessel-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
@@ -985,6 +993,33 @@
           <input type="hidden" id="edit-vessel-icon">
         </div>
       </div>
+
+      <div class="pt-2 border-t border-gray-100">
+        <label class="block text-xs font-semibold text-gray-600 mb-0.5">Vessel Portal Access</label>
+        <p class="text-xs text-gray-400 mb-2">Lets this vessel's crew log into the separate Vessel Portal to view and report their own PMS only. This is a simple ID/password gate for an honest crew — not hardened security — so don't reuse a sensitive password here.</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Portal ID</label>
+            <input type="text" id="edit-vessel-portal-id" placeholder="e.g., ATLANTIC01"
+              class="form-input w-full px-3 py-2 rounded-lg text-sm mono" autocomplete="off">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Password</label>
+            <div class="flex gap-2">
+              <input type="text" id="edit-vessel-portal-password" placeholder="Not set"
+                class="form-input flex-1 px-3 py-2 rounded-lg text-sm mono" autocomplete="off">
+              <button type="button" onclick="generatePortalPassword()" title="Generate a random password"
+                class="px-2.5 py-2 rounded-lg btn-secondary text-xs font-medium whitespace-nowrap">Generate</button>
+            </div>
+          </div>
+        </div>
+        <button type="button" onclick="copyPortalLink()" id="copy-portal-link-btn"
+          class="mt-2 text-xs font-medium text-blue-600 hover:text-blue-700 flex items-center gap-1">
+          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 010 5.656l-3 3a4 4 0 01-5.656-5.656l1.5-1.5M10.172 13.828a4 4 0 010-5.656l3-3a4 4 0 015.656 5.656l-1.5 1.5"/></svg>
+          Copy vessel portal link
+        </button>
+      </div>
+
       <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
         <button type="button" onclick="closeModal('edit-vessel-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
         <button type="submit" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2">
@@ -1955,6 +1990,16 @@ function openCloseOut(taskId) {
   document.getElementById('closeout-task-subtitle').textContent = `${vessel?.name||''} · ${task.category}`;
   document.getElementById('closeout-date').value = TODAY.toISOString().split('T')[0];
   document.getElementById('closeout-signoff').value = vessel?.chief || '';
+
+  // Hour-meter reading field — only for running-hours tasks
+  const hoursSection = document.getElementById('closeout-hours-section');
+  const isHours = task.intervalType === 'hours';
+  hoursSection.classList.toggle('hidden', !isHours);
+  if (isHours) {
+    const current = vessel?.currentRunningHours?.[task.component] ?? task.lastDoneHours ?? 0;
+    document.getElementById('closeout-hours-reading').value = current;
+    document.getElementById('closeout-hours-reading').min = task.lastDoneHours ?? 0;
+  }
   document.getElementById('closeout-work-done').value = '';
   document.getElementById('closeout-parts').value = '';
   document.querySelector('input[name="condition"][value="Good"]').checked = true;
@@ -2015,6 +2060,10 @@ function getChecklistResults() {
 }
 
 function updateNextDuePreview(task) {
+  if (task.intervalType === 'hours') {
+    document.getElementById('next-due-preview').classList.add('hidden');
+    return;
+  }
   const v = document.getElementById('closeout-date').value;
   if (!v) return;
   document.getElementById('next-due-preview').classList.remove('hidden');
@@ -2033,6 +2082,18 @@ async function submitCloseOut(e) {
 
   if (!date || !signoff || !workDone) { showToast('Please complete all required fields.', 'error'); return; }
 
+  const task = state.tasks.find(t => t.id === taskId);
+  if (!task) return;
+
+  let hoursReading = null;
+  if (task.intervalType === 'hours') {
+    hoursReading = parseFloat(document.getElementById('closeout-hours-reading').value);
+    if (!Number.isFinite(hoursReading) || hoursReading < (task.lastDoneHours ?? 0)) {
+      showToast(`Enter a valid hour-meter reading (≥ ${task.lastDoneHours ?? 0}).`, 'error');
+      return;
+    }
+  }
+
   // Drill attendees validation
   const attendees = getAttendeeList();
   if (isDrill && attendees.length === 0) {
@@ -2047,8 +2108,6 @@ async function submitCloseOut(e) {
     if (!confirm(`${unverified} checklist item${unverified!==1?'s are':' is'} not checked off. Submit anyway?`)) return;
   }
 
-  const task = state.tasks.find(t => t.id === taskId);
-  if (!task) return;
   const newNextDue = computeNextDue(date, task.intervalType, task.frequency);
 
   // logEntry has no client-side id yet — Firestore assigns one to
@@ -2063,6 +2122,7 @@ async function submitCloseOut(e) {
     attendees: isDrill ? attendees : [],
     checklistResults,
     previousNextDue: task.nextDue, newNextDue,
+    ...(task.intervalType === 'hours' ? { hoursReading, previousLastDoneHours: task.lastDoneHours ?? 0 } : {}),
     loggedAt: new Date().toISOString(),
   };
 
@@ -2070,14 +2130,18 @@ async function submitCloseOut(e) {
   submitBtn?.setAttribute('disabled', 'true');
   try {
     const updatedHistory = [logEntry, ...(task.history || [])];
-    await window.FGDB.updateTask(task.id, {
+    const updates = {
       lastDone: date,
       nextDue: newNextDue,
       history: updatedHistory,
-    });
+    };
+    if (task.intervalType === 'hours') updates.lastDoneHours = hoursReading;
+    await window.FGDB.updateTask(task.id, updates);
     await window.FGDB.addLog(logEntry);
     closeModal('closeout-modal');
-    showToast(`✓ Close-out recorded. Next due: ${formatDate(newNextDue)}`, 'success');
+    showToast(task.intervalType === 'hours'
+      ? `✓ Close-out recorded. Next due at ${(hoursReading + task.frequency).toLocaleString()} hrs.`
+      : `✓ Close-out recorded. Next due: ${formatDate(newNextDue)}`, 'success');
   } catch (err) {
     console.error('FleetGuard: close-out save failed', err);
     showToast('Failed to save close-out. Check your connection and try again.', 'error');
@@ -3002,6 +3066,8 @@ function openEditVesselModal() {
   document.getElementById('edit-vessel-master').value= vessel.master|| '';
   document.getElementById('edit-vessel-chief').value = vessel.chief || '';
   document.getElementById('edit-vessel-icon').value  = vessel.icon;
+  document.getElementById('edit-vessel-portal-id').value       = vessel.portalId || '';
+  document.getElementById('edit-vessel-portal-password').value = vessel.portalPassword || '';
 
   // Build icon picker pre-selecting current icon
   document.getElementById('edit-icon-picker').innerHTML = VESSEL_ICONS.map(icon => `
@@ -3019,11 +3085,38 @@ function selectEditVesselIcon(icon, btn) {
   btn.classList.add('border-blue-500','bg-blue-50');
 }
 
+// Generates a readable random password (avoids ambiguous chars like 0/O, 1/I)
+function generatePortalPassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  let pw = '';
+  for (let i = 0; i < 10; i++) pw += chars[Math.floor(Math.random() * chars.length)];
+  document.getElementById('edit-vessel-portal-password').value = pw;
+}
+
+// Copies a ready-to-share vessel-portal.html link (with the Portal ID
+// pre-filled as a query param) to the clipboard, so office staff can just
+// paste it into a message to the vessel along with the password.
+function copyPortalLink() {
+  const portalId = document.getElementById('edit-vessel-portal-id').value.trim();
+  if (!portalId) { showToast('Set a Portal ID first, then save, to get a shareable link.', 'error'); return; }
+  const link = new URL('vessel-portal.html', window.location.href);
+  link.searchParams.set('id', portalId);
+  navigator.clipboard?.writeText(link.toString())
+    .then(() => showToast('✓ Portal link copied to clipboard.', 'success'))
+    .catch(() => showToast(link.toString(), 'success'));
+}
+
 async function submitEditVessel(e) {
   e.preventDefault();
   const id = document.getElementById('edit-vessel-id').value;
   const vessel = state.vessels.find(v => v.id === id);
   if (!vessel) return;
+
+  const portalId = document.getElementById('edit-vessel-portal-id').value.trim();
+  if (portalId) {
+    const clash = state.vessels.find(v => v.id !== id && (v.portalId || '').toLowerCase() === portalId.toLowerCase());
+    if (clash) { showToast(`Portal ID "${portalId}" is already used by ${clash.name}. Pick a unique one.`, 'error'); return; }
+  }
 
   const updated = {
     name:   document.getElementById('edit-vessel-name').value.trim(),
@@ -3034,6 +3127,8 @@ async function submitEditVessel(e) {
     master: document.getElementById('edit-vessel-master').value.trim(),
     chief:  document.getElementById('edit-vessel-chief').value.trim(),
     icon:   document.getElementById('edit-vessel-icon').value || '🚢',
+    portalId,
+    portalPassword: document.getElementById('edit-vessel-portal-password').value,
   };
 
   try {

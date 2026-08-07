@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FleetGuard PMS — Vessel Portal</title>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- ============================================================
+     FIREBASE (Cloud Firestore) — v10 Modular SDK
+     Shares the exact same project/collections as the office portal
+     (index.html). This page only ever touches the single vessel the
+     crew logs into: it reads that vessel's own tasks, updates them
+     on close-out, and writes running-hours readings + log entries.
+
+     ⚠️ IMPORTANT — this login is a UI-level convenience gate only.
+     The Portal ID / Password are matched client-side against plain
+     fields on the vessel document. There are no Firestore Security
+     Rules behind this, so it does not stop a technically determined
+     person from reading/writing other vessels' data directly. It is
+     meant to keep an honest crew looking at their own ship, not to
+     protect sensitive data. If you need real access control, this
+     needs Firebase Authentication + Security Rules layered in.
+============================================================= -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getFirestore, collection, doc, updateDoc, addDoc,
+    onSnapshot, getDocs
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  // Same config as index.html — Firebase Console → Project Settings
+  const firebaseConfig = {
+    apiKey:            "AIzaSyBwo8krwWII_HQv_wxQBmdCIRN-nrd_1jE",
+    authDomain:        "fleetguard-pms.firebaseapp.com",
+    projectId:         "fleetguard-pms",
+    storageBucket:      "fleetguard-pms.firebasestorage.app",
+    messagingSenderId: "685922016706",
+    appId:             "1:685922016706:web:d6fb7bb3296683203fca5b"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
+  const vesselsCol = collection(db, "vessels");
+  const tasksCol   = collection(db, "tasks");
+  const logsCol    = collection(db, "logs");
+
+  window.FGDB = {
+    // One-time fetch used only for the login check
+    fetchVessels: async () => {
+      const snap = await getDocs(vesselsCol);
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    },
+    // Live listeners, started only after a successful login
+    watchVessel: (vesselId, cb) => onSnapshot(doc(db, "vessels", vesselId), d => cb(d.exists() ? { id: d.id, ...d.data() } : null)),
+    watchTasks:  (cb) => onSnapshot(tasksCol, snap => cb(snap.docs.map(d => ({ id: d.id, ...d.data() })))),
+
+    updateVessel: (id, data) => updateDoc(doc(db, "vessels", id), data),
+    updateTask:   (id, data) => updateDoc(doc(db, "tasks", id), data),
+    addLog:       (data)     => addDoc(logsCol, data),
+  };
+
+  window.dispatchEvent(new CustomEvent("fleetguard:db-ready"));
+</script>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  * { font-family: 'Inter', sans-serif; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #f1f5f9; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  .form-input { border: 1px solid #d1d5db; background: #fff; transition: border-color .15s, box-shadow .15s; }
+  .form-input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,.12); }
+  .btn-primary { background: #2563eb; color: #fff; }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-secondary { background: #fff; color: #374151; border: 1px solid #d1d5db; }
+  .btn-secondary:hover { background: #f9fafb; }
+  .modal-overlay { background: rgba(15,23,42,.55); backdrop-filter: blur(2px); }
+  .status-red    { background:#fef2f2; color:#dc2626; }
+  .status-yellow { background:#fefce8; color:#ca8a04; }
+  .status-green  { background:#f0fdf4; color:#16a34a; }
+  .task-row.overdue    { border-left: 3px solid #ef4444; }
+  .task-row.coming-due { border-left: 3px solid #eab308; }
+  .task-row.compliant  { border-left: 3px solid #22c55e; }
+  .task-row.unassigned { border-left: 3px solid #94a3b8; }
+  .pulse-red { animation: pulseRed 2s ease-in-out infinite; }
+  @keyframes pulseRed { 0%,100%{opacity:1} 50%{opacity:.55} }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<!-- ===== LOGIN SCREEN ===== -->
+<div id="login-screen" class="min-h-screen flex items-center justify-center p-4">
+  <div class="w-full max-w-sm">
+    <div class="text-center mb-6">
+      <div class="text-4xl mb-2">🚢</div>
+      <h1 class="text-lg font-bold text-gray-900">FleetGuard PMS</h1>
+      <p class="text-sm text-gray-400">Vessel Portal</p>
+    </div>
+    <form id="login-form" onsubmit="submitLogin(event)" class="bg-white border border-gray-200 rounded-2xl shadow-sm p-6 space-y-4">
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Portal ID</label>
+        <input type="text" id="login-id" required autocomplete="username" placeholder="e.g., ATLANTIC01"
+          class="form-input w-full px-3 py-2.5 rounded-lg text-sm mono">
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Password</label>
+        <input type="password" id="login-password" required autocomplete="current-password"
+          class="form-input w-full px-3 py-2.5 rounded-lg text-sm">
+      </div>
+      <div id="login-error" class="hidden text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2"></div>
+      <button type="submit" id="login-submit-btn"
+        class="w-full py-2.5 rounded-lg btn-primary text-sm font-semibold shadow-sm">
+        Sign In
+      </button>
+      <p class="text-xs text-gray-400 text-center">Don't have a Portal ID? Ask your office for your vessel's login.</p>
+    </form>
+  </div>
+</div>
+
+<!-- ===== VESSEL DASHBOARD (shown after login) ===== -->
+<div id="portal-app" class="hidden min-h-screen">
+  <header class="bg-white border-b border-gray-200 sticky top-0 z-20">
+    <div class="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-2.5">
+        <span id="portal-vessel-icon" class="text-2xl"></span>
+        <div>
+          <div id="portal-vessel-name" class="text-sm font-bold text-gray-900"></div>
+          <div id="portal-vessel-sub" class="text-xs text-gray-400"></div>
+        </div>
+      </div>
+      <button onclick="portalSignOut()" class="text-xs font-medium text-gray-500 hover:text-red-600 flex items-center gap-1">
+        Sign Out
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="max-w-3xl mx-auto px-4 py-5 space-y-5">
+    <div id="portal-kpi-strip" class="grid grid-cols-3 gap-3"></div>
+    <div id="portal-hours-panel" class="bg-white rounded-xl border border-gray-200 shadow-sm p-4"></div>
+
+    <div>
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-sm font-bold text-gray-900">Maintenance Tasks</h2>
+        <select id="portal-status-filter" onchange="renderPortalTasks()" class="form-input px-2 py-1 rounded-lg text-xs">
+          <option value="all">All Statuses</option>
+          <option value="overdue">Overdue</option>
+          <option value="coming-due">Coming Due</option>
+          <option value="compliant">Compliant</option>
+        </select>
+      </div>
+      <div id="portal-task-list" class="space-y-2"></div>
+    </div>
+  </main>
+</div>
+
+<!-- ===== CLOSE-OUT MODAL ===== -->
+<div id="closeout-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <div>
+        <h2 class="text-base font-bold text-gray-900">Report / Close Out Task</h2>
+        <p id="closeout-task-subtitle" class="text-xs text-gray-400 mt-0.5"></p>
+      </div>
+      <button onclick="closeModal('closeout-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div id="closeout-task-banner" class="mx-6 mt-4 p-3 rounded-xl bg-gray-50 border border-gray-200 text-xs grid grid-cols-2 gap-2"></div>
+    <form id="closeout-form" onsubmit="submitCloseOut(event)" class="px-6 py-4 space-y-4">
+      <input type="hidden" id="closeout-task-id">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Date of Inspection / Maintenance <span class="text-red-500">*</span></label>
+          <input type="date" id="closeout-date" required class="form-input w-full px-3 py-2 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1.5">Chief Engineer / Master Sign-off <span class="text-red-500">*</span></label>
+          <input type="text" id="closeout-signoff" required placeholder="Full name and rank"
+            class="form-input w-full px-3 py-2 rounded-lg text-sm" autocomplete="off">
+        </div>
+      </div>
+      <div id="closeout-hours-section" class="hidden">
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Hour-Meter Reading at Completion <span class="text-red-500">*</span></label>
+        <input type="number" id="closeout-hours-reading" min="0" step="1"
+          class="form-input w-full px-3 py-2 rounded-lg text-sm mono" placeholder="e.g., 14250">
+        <p class="text-xs text-gray-400 mt-1">This becomes the new baseline the next interval counts from.</p>
+      </div>
+      <div id="closeout-checklist-section" class="hidden">
+        <div class="flex items-center justify-between mb-1.5">
+          <label class="text-xs font-semibold text-gray-600">Checklist Items</label>
+          <span id="closeout-checklist-progress" class="text-xs text-gray-400"></span>
+        </div>
+        <div id="closeout-checklist-list" class="space-y-1.5 p-2 rounded-lg bg-gray-50 border border-gray-200 max-h-56 overflow-y-auto"></div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Work Done / Details of Inspection <span class="text-red-500">*</span></label>
+        <textarea id="closeout-work-done" required rows="3"
+          placeholder="Describe the maintenance work carried out, procedures followed, measurements taken…"
+          class="form-input w-full px-3 py-2 rounded-lg text-sm resize-none"></textarea>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Parts Used / Findings / Remarks</label>
+        <textarea id="closeout-parts" rows="2"
+          placeholder="List any parts replaced, consumables used, or observations noted."
+          class="form-input w-full px-3 py-2 rounded-lg text-sm resize-none"></textarea>
+      </div>
+      <div id="drill-attendees-section" class="hidden">
+        <div class="flex items-center gap-2 mb-1.5">
+          <label class="text-xs font-semibold text-gray-600">Drill Attendees <span class="text-red-500">*</span></label>
+          <span class="text-xs text-gray-400">(all crew present must be listed)</span>
+        </div>
+        <div class="flex gap-2 mb-2">
+          <input type="text" id="attendee-input" placeholder="Enter name and press Add or Enter…"
+            class="form-input flex-1 px-3 py-2 rounded-lg text-sm"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addAttendee();}">
+          <button type="button" onclick="addAttendee()"
+            class="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors whitespace-nowrap">+ Add</button>
+        </div>
+        <div id="attendee-tags" class="flex flex-wrap gap-1.5 min-h-[2rem] p-2 rounded-lg bg-gray-50 border border-gray-200"></div>
+        <div class="flex items-center justify-between mt-1">
+          <span id="attendee-count" class="text-xs text-gray-400">0 attendees listed</span>
+          <button type="button" onclick="clearAttendees()" class="text-xs text-gray-400 hover:text-red-500 transition-colors">Clear all</button>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Condition Assessment</label>
+        <div class="flex gap-4">
+          <label class="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
+            <input type="radio" name="condition" value="Good" checked class="accent-green-600"> Good
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
+            <input type="radio" name="condition" value="Fair" class="accent-yellow-500"> Fair
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
+            <input type="radio" name="condition" value="Poor - Action Required" class="accent-red-500"> Poor — Action Required
+          </label>
+        </div>
+      </div>
+      <div id="next-due-preview" class="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs hidden">
+        <div class="flex items-center gap-2 text-blue-700">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          Next due date will reset to: <strong id="next-due-preview-date" class="text-blue-900 ml-1"></strong>
+        </div>
+      </div>
+      <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
+        <button type="button" onclick="closeModal('closeout-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
+        <button type="submit" id="closeout-submit-btn" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          Submit & Reset Schedule
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===== LOG RUNNING HOURS MODAL ===== -->
+<div id="hours-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-overlay">
+  <div class="bg-white border border-gray-200 rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+      <h2 class="text-base font-bold text-gray-900">Log Running Hours</h2>
+      <button onclick="closeModal('hours-modal')" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <form id="hours-form" onsubmit="submitLogHours(event)" class="px-6 py-4 space-y-4">
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Reading Date <span class="text-red-500">*</span></label>
+        <input type="date" id="hours-date" required class="form-input w-full px-3 rounded-lg text-sm">
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Recorded By <span class="text-red-500">*</span></label>
+        <input type="text" id="hours-signoff" required placeholder="Full name and rank" class="form-input w-full px-3 py-2 rounded-lg text-sm">
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-1.5">
+          <label class="block text-xs font-semibold text-gray-600">Hour-Meter Readings</label>
+          <span class="text-xs text-gray-400">New reading must be ≥ current</span>
+        </div>
+        <div id="hours-fields-grid" class="space-y-2"></div>
+      </div>
+      <div id="hours-run-summary" class="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-700"></div>
+      <div class="flex justify-end gap-3 pt-2 border-t border-gray-100">
+        <button type="button" onclick="closeModal('hours-modal')" class="px-4 py-2 rounded-lg btn-secondary text-sm">Cancel</button>
+        <button type="submit" class="px-5 py-2 rounded-lg btn-primary text-sm font-medium shadow-sm flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          Save Reading
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="toast-container" class="fixed bottom-4 right-4 z-[100] space-y-2"></div>
+
+<script>
+// ================================================================
+// FleetGuard PMS — Vessel Portal (crew-facing, single vessel scope)
+// See the security note in the <head> module script above: this
+// login is a convenience gate, not hardened access control.
+// ================================================================
+const TODAY = new Date();
+let portalVessel = null;   // the logged-in vessel's full document
+let portalTasks  = [];     // tasks belonging to that vessel
+
+// ── SESSION ──────────────────────────────────────────────────
+function saveSession(vesselId, portalId) {
+  localStorage.setItem('fg_portal_session', JSON.stringify({ vesselId, portalId }));
+}
+function loadSession() {
+  try { return JSON.parse(localStorage.getItem('fg_portal_session') || 'null'); }
+  catch { return null; }
+}
+function clearSession() { localStorage.removeItem('fg_portal_session'); }
+
+function portalSignOut() {
+  clearSession();
+  window.location.reload();
+}
+
+// ── LOGIN ────────────────────────────────────────────────────
+async function submitLogin(e) {
+  e.preventDefault();
+  const id = document.getElementById('login-id').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errBox = document.getElementById('login-error');
+  const btn = document.getElementById('login-submit-btn');
+  errBox.classList.add('hidden');
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
+
+  try {
+    const vessels = await window.FGDB.fetchVessels();
+    const match = vessels.find(v => (v.portalId || '').toLowerCase() === id.toLowerCase());
+    if (!match || !match.portalId) {
+      errBox.textContent = 'No vessel found for that Portal ID.';
+      errBox.classList.remove('hidden');
+      return;
+    }
+    if ((match.portalPassword || '') !== password) {
+      errBox.textContent = 'Incorrect password.';
+      errBox.classList.remove('hidden');
+      return;
+    }
+    saveSession(match.id, match.portalId);
+    startPortal(match.id);
+  } catch (err) {
+    console.error('FleetGuard Portal: login failed', err);
+    errBox.textContent = 'Could not reach the database. Check your connection and try again.';
+    errBox.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sign In';
+  }
+}
+
+function startPortal(vesselId) {
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('portal-app').classList.remove('hidden');
+
+  window.FGDB.watchVessel(vesselId, vessel => {
+    if (!vessel) { showToast('This vessel is no longer available. Signing out.', 'error'); setTimeout(portalSignOut, 1500); return; }
+    portalVessel = vessel;
+    renderPortalHeader();
+    renderPortalHours();
+    renderPortalKPIs();
+    renderPortalTasks();
+  });
+  window.FGDB.watchTasks(tasks => {
+    portalTasks = tasks.filter(t => t.vesselId === vesselId);
+    portalTasks.forEach(t => { if (!Array.isArray(t.history)) t.history = []; });
+    renderPortalKPIs();
+    renderPortalTasks();
+  });
+}
+
+// ── HELPERS (mirrors the office app's date/status logic) ───────
+function parseDate(str) { if (!str) return null; const d = new Date(str + 'T00:00:00'); return isNaN(d) ? null : d; }
+function formatDate(str) { const d = parseDate(str); return d ? d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }) : '—'; }
+function daysUntil(str) { const d = parseDate(str); return d ? Math.round((d - TODAY) / 86400000) : null; }
+function computeNextDue(lastDone, intervalType, frequency) {
+  const last = parseDate(lastDone);
+  if (!last) return null;
+  const next = new Date(last);
+  if (intervalType === 'months') next.setMonth(next.getMonth() + frequency);
+  else if (intervalType === 'days') next.setDate(next.getDate() + frequency);
+  else next.setDate(next.getDate() + Math.ceil(frequency / 24));
+  return next.toISOString().split('T')[0];
+}
+function intervalLabel(intervalType, frequency) {
+  if (intervalType === 'hours') return `${frequency} Hrs`;
+  if (intervalType === 'months') return `${frequency} Mo.`;
+  if (frequency % 365 === 0) return `${frequency/365} Yr`;
+  if (frequency % 30 === 0)  return `${frequency/30} Mo.`;
+  if (frequency % 7 === 0)   return `${frequency/7} Wk`;
+  return `${frequency} Days`;
+}
+function escapeHtml(str) { return String(str ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function checklistLetter(i) { let n=i,s=''; do { s=String.fromCharCode(97+(n%26))+s; n=Math.floor(n/26)-1; } while(n>=0); return s; }
+
+function getVesselEquipment(vessel) {
+  return (vessel && Array.isArray(vessel.equipment) && vessel.equipment.length) ? vessel.equipment : [];
+}
+function getHoursRemaining(task) {
+  const comp = task.component;
+  if (!comp || !portalVessel || !(comp in (portalVessel.currentRunningHours || {}))) return null;
+  const currentHrs = portalVessel.currentRunningHours[comp] ?? 0;
+  return (task.lastDoneHours ?? 0) + task.frequency - currentHrs;
+}
+function getStatus(task) {
+  if (task.intervalType === 'hours') {
+    const rem = getHoursRemaining(task);
+    if (rem === null) return 'unassigned';
+    if (rem <= 0) return 'overdue';
+    if (rem <= 50) return 'coming-due';
+    return 'compliant';
+  }
+  const days = daysUntil(task.nextDue);
+  if (days === null) return 'unknown';
+  if (days < 0) return 'overdue';
+  const intervalDays = task.intervalType === 'months' ? task.frequency * 30 : task.frequency;
+  const yellowWindow = Math.min(Math.max(14, Math.floor(intervalDays * 0.1)), 30);
+  if (days <= yellowWindow) return 'coming-due';
+  return 'compliant';
+}
+function statusBadge(task) {
+  const s = getStatus(task);
+  if (s === 'unassigned') return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500 border border-slate-200"><span class="w-1.5 h-1.5 rounded-full bg-slate-400 inline-block"></span>No equipment assigned</span>`;
+  if (task.intervalType === 'hours') {
+    const rem = getHoursRemaining(task); const abs = Math.abs(rem);
+    if (s === 'overdue') return `<span class="status-red inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${abs>100?'pulse-red':''}"><span class="w-1.5 h-1.5 rounded-full bg-red-500 inline-block"></span>Overdue ${abs}h</span>`;
+    if (s === 'coming-due') return `<span class="status-yellow inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-yellow-500 inline-block"></span>Due in ${rem}h</span>`;
+    return `<span class="status-green inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>${rem}h left</span>`;
+  }
+  const days = daysUntil(task.nextDue); const abs = Math.abs(days);
+  if (s === 'overdue') return `<span class="status-red inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${abs>30?'pulse-red':''}"><span class="w-1.5 h-1.5 rounded-full bg-red-500 inline-block"></span>Overdue ${abs}d</span>`;
+  if (s === 'coming-due') return `<span class="status-yellow inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-yellow-500 inline-block"></span>Due in ${days}d</span>`;
+  return `<span class="status-green inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>${days}d</span>`;
+}
+function rowClass(task) {
+  const s = getStatus(task);
+  return (s === 'overdue' || s === 'coming-due' || s === 'unassigned') ? s : 'compliant';
+}
+
+// ── RENDER: HEADER / KPIs / HOURS ───────────────────────────────
+function renderPortalHeader() {
+  document.getElementById('portal-vessel-icon').textContent = portalVessel.icon || '🚢';
+  document.getElementById('portal-vessel-name').textContent = portalVessel.name;
+  document.getElementById('portal-vessel-sub').textContent = `${portalVessel.type || ''} · ${portalVessel.flag || ''}`;
+}
+function renderPortalKPIs() {
+  const overdue    = portalTasks.filter(t => getStatus(t) === 'overdue').length;
+  const comingDue  = portalTasks.filter(t => getStatus(t) === 'coming-due').length;
+  const compliant  = portalTasks.filter(t => getStatus(t) === 'compliant').length;
+  document.getElementById('portal-kpi-strip').innerHTML = `
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-3 text-center">
+      <div class="text-xl font-bold text-red-600">${overdue}</div><div class="text-xs text-gray-400 mt-0.5">Overdue</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-3 text-center">
+      <div class="text-xl font-bold text-yellow-600">${comingDue}</div><div class="text-xs text-gray-400 mt-0.5">Coming Due</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-3 text-center">
+      <div class="text-xl font-bold text-green-600">${compliant}</div><div class="text-xs text-gray-400 mt-0.5">Compliant</div>
+    </div>
+  `;
+}
+function renderPortalHours() {
+  const equipment = getVesselEquipment(portalVessel);
+  document.getElementById('portal-hours-panel').innerHTML = `
+    <div class="flex items-center justify-between mb-3">
+      <span class="text-xs font-semibold text-gray-600">Running Hours</span>
+      <button onclick="openLogHoursModal()" class="text-xs font-medium text-blue-600 hover:text-blue-700 flex items-center gap-1">
+        <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        Log Running Hours
+      </button>
+    </div>
+    ${equipment.length === 0 ? `<div class="py-3 text-center text-gray-400 text-sm">No equipment set up for this vessel yet — contact your office.</div>` : `
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      ${equipment.map(f => `
+        <div class="rounded-lg border border-gray-200 p-3">
+          <div class="text-xs text-gray-500">${f.label}</div>
+          <div class="text-lg font-bold text-gray-900 mono mt-0.5">${(portalVessel.currentRunningHours?.[f.key] ?? 0).toLocaleString()} <span class="text-xs font-normal text-gray-400">hrs</span></div>
+        </div>`).join('')}
+    </div>`}
+  `;
+}
+
+// ── RENDER: TASK LIST ───────────────────────────────────────────
+function renderPortalTasks() {
+  const filter = document.getElementById('portal-status-filter').value;
+  let tasks = [...portalTasks];
+  if (filter !== 'all') tasks = tasks.filter(t => getStatus(t) === filter);
+  tasks.sort((a, b) => {
+    const order = { overdue: 0, 'coming-due': 1, unassigned: 2, compliant: 3, unknown: 4 };
+    return (order[getStatus(a)] ?? 9) - (order[getStatus(b)] ?? 9);
+  });
+
+  const list = document.getElementById('portal-task-list');
+  if (!tasks.length) {
+    list.innerHTML = `<div class="py-8 text-center text-gray-400 text-sm bg-white rounded-xl border border-gray-200">No tasks match this filter.</div>`;
+    return;
+  }
+  list.innerHTML = tasks.map(t => `
+    <div class="task-row ${rowClass(t)} bg-white rounded-xl border border-gray-200 shadow-sm p-3.5 flex items-center justify-between gap-3">
+      <div class="min-w-0">
+        <div class="text-sm font-semibold text-gray-900 truncate">${escapeHtml(t.name)}</div>
+        <div class="text-xs text-gray-400 mt-0.5">${escapeHtml(t.category)} · Every ${intervalLabel(t.intervalType, t.frequency)} · Last done ${formatDate(t.lastDone)}</div>
+      </div>
+      <div class="flex items-center gap-3 shrink-0">
+        ${statusBadge(t)}
+        <button onclick="openCloseOut('${t.id}')" class="px-3 py-1.5 rounded-lg btn-primary text-xs font-semibold shadow-sm whitespace-nowrap">Report</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── MODALS ───────────────────────────────────────────────────
+function openModal(id) { const m = document.getElementById(id); m.classList.remove('hidden'); m.classList.add('flex'); }
+function closeModal(id) { const m = document.getElementById(id); m.classList.add('hidden'); m.classList.remove('flex'); }
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') ['closeout-modal', 'hours-modal'].forEach(id => closeModal(id));
+});
+
+let _attendees = [];
+function addAttendee() {
+  const input = document.getElementById('attendee-input');
+  const name = input.value.trim();
+  if (!name) return;
+  _attendees.push(name);
+  input.value = '';
+  renderAttendees();
+}
+function clearAttendees() { _attendees = []; renderAttendees(); }
+function removeAttendee(i) { _attendees.splice(i, 1); renderAttendees(); }
+function getAttendeeList() { return [..._attendees]; }
+function renderAttendees() {
+  document.getElementById('attendee-tags').innerHTML = _attendees.map((n, i) => `
+    <span class="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-xs font-medium">
+      ${escapeHtml(n)}
+      <button type="button" onclick="removeAttendee(${i})" class="hover:text-indigo-900">&times;</button>
+    </span>`).join('');
+  document.getElementById('attendee-count').textContent = `${_attendees.length} attendee${_attendees.length!==1?'s':''} listed`;
+}
+
+let _currentCloseoutTask = null;
+function openCloseOut(taskId) {
+  const task = portalTasks.find(t => t.id === taskId);
+  if (!task) return;
+  _currentCloseoutTask = task;
+  const isDrill = task.category === 'Safety / Drills' && /drill/i.test(task.name);
+
+  document.getElementById('closeout-task-id').value = taskId;
+  document.getElementById('closeout-task-subtitle').textContent = `${portalVessel.name} · ${task.category}`;
+  document.getElementById('closeout-date').value = TODAY.toISOString().split('T')[0];
+  document.getElementById('closeout-signoff').value = portalVessel.chief || '';
+  document.getElementById('closeout-work-done').value = '';
+  document.getElementById('closeout-parts').value = '';
+  document.querySelector('input[name="condition"][value="Good"]').checked = true;
+
+  const hoursSection = document.getElementById('closeout-hours-section');
+  const isHours = task.intervalType === 'hours';
+  hoursSection.classList.toggle('hidden', !isHours);
+  if (isHours) {
+    const current = portalVessel.currentRunningHours?.[task.component] ?? task.lastDoneHours ?? 0;
+    document.getElementById('closeout-hours-reading').value = current;
+    document.getElementById('closeout-hours-reading').min = task.lastDoneHours ?? 0;
+  }
+
+  document.getElementById('closeout-work-done').placeholder = isDrill
+    ? 'Describe the drill conducted, scenario used, time taken, equipment deployed…'
+    : 'Describe the maintenance work carried out, procedures followed, measurements taken…';
+
+  document.getElementById('drill-attendees-section').classList.toggle('hidden', !isDrill);
+  clearAttendees();
+  renderCloseoutChecklist(task);
+
+  document.getElementById('closeout-task-banner').innerHTML = `
+    <div><div class="text-gray-400 mb-0.5">Task</div><div class="font-semibold text-gray-800">${escapeHtml(task.name)}</div></div>
+    <div><div class="text-gray-400 mb-0.5">Interval</div><div class="font-semibold text-gray-800">${intervalLabel(task.intervalType,task.frequency)}</div></div>
+    <div><div class="text-gray-400 mb-0.5">Last Done</div><div class="font-semibold text-gray-800">${formatDate(task.lastDone)}</div></div>
+    <div><div class="text-gray-400 mb-0.5">Status</div><div>${statusBadge(task)}</div></div>
+  `;
+  updateNextDuePreview(task);
+  document.getElementById('closeout-date').oninput = () => updateNextDuePreview(task);
+  openModal('closeout-modal');
+}
+function renderCloseoutChecklist(task) {
+  const section = document.getElementById('closeout-checklist-section');
+  const list = document.getElementById('closeout-checklist-list');
+  const items = task.checklist || [];
+  if (!items.length) { section.classList.add('hidden'); list.innerHTML = ''; return; }
+  section.classList.remove('hidden');
+  list.innerHTML = items.map((text, i) => `
+    <label class="flex items-start gap-2 py-1 cursor-pointer">
+      <input type="checkbox" class="checklist-item-cb mt-0.5 w-4 h-4 accent-green-600 shrink-0" data-text="${escapeHtml(text)}" onchange="updateChecklistProgress()">
+      <span class="flex-1 text-sm text-gray-700"><span class="mono text-xs text-gray-400 mr-1">${checklistLetter(i)})</span>${escapeHtml(text)}</span>
+    </label>`).join('');
+  updateChecklistProgress();
+}
+function updateChecklistProgress() {
+  const boxes = [...document.querySelectorAll('#closeout-checklist-list .checklist-item-cb')];
+  const checked = boxes.filter(b => b.checked).length;
+  const el = document.getElementById('closeout-checklist-progress');
+  if (el) el.textContent = boxes.length ? `${checked} of ${boxes.length} verified` : '';
+}
+function getChecklistResults() {
+  return [...document.querySelectorAll('#closeout-checklist-list .checklist-item-cb')].map(b => ({ text: b.dataset.text, ok: b.checked }));
+}
+function updateNextDuePreview(task) {
+  if (task.intervalType === 'hours') { document.getElementById('next-due-preview').classList.add('hidden'); return; }
+  const v = document.getElementById('closeout-date').value;
+  if (!v) return;
+  document.getElementById('next-due-preview').classList.remove('hidden');
+  document.getElementById('next-due-preview-date').textContent = formatDate(computeNextDue(v, task.intervalType, task.frequency));
+}
+
+async function submitCloseOut(e) {
+  e.preventDefault();
+  const taskId = document.getElementById('closeout-task-id').value;
+  const date = document.getElementById('closeout-date').value;
+  const signoff = document.getElementById('closeout-signoff').value.trim();
+  const workDone = document.getElementById('closeout-work-done').value.trim();
+  const parts = document.getElementById('closeout-parts').value.trim();
+  const condition = document.querySelector('input[name="condition"]:checked')?.value || 'Good';
+  const isDrill = _currentCloseoutTask?.category === 'Safety / Drills';
+
+  if (!date || !signoff || !workDone) { showToast('Please complete all required fields.', 'error'); return; }
+
+  const task = portalTasks.find(t => t.id === taskId);
+  if (!task) return;
+
+  let hoursReading = null;
+  if (task.intervalType === 'hours') {
+    hoursReading = parseFloat(document.getElementById('closeout-hours-reading').value);
+    if (!Number.isFinite(hoursReading) || hoursReading < (task.lastDoneHours ?? 0)) {
+      showToast(`Enter a valid hour-meter reading (≥ ${task.lastDoneHours ?? 0}).`, 'error');
+      return;
+    }
+  }
+
+  const attendees = getAttendeeList();
+  if (isDrill && attendees.length === 0) {
+    showToast('Please add at least one drill attendee.', 'error');
+    document.getElementById('attendee-input').focus();
+    return;
+  }
+
+  const checklistResults = getChecklistResults();
+  if (checklistResults.length && checklistResults.some(r => !r.ok)) {
+    const unverified = checklistResults.filter(r => !r.ok).length;
+    if (!confirm(`${unverified} checklist item${unverified!==1?'s are':' is'} not checked off. Submit anyway?`)) return;
+  }
+
+  const newNextDue = computeNextDue(date, task.intervalType, task.frequency);
+  const logEntry = {
+    taskId, taskName: task.name, category: task.category, vesselId: task.vesselId,
+    completionDate: date, signoff, workDone,
+    parts: parts || 'None', condition,
+    attendees: isDrill ? attendees : [],
+    checklistResults,
+    previousNextDue: task.nextDue, newNextDue,
+    ...(task.intervalType === 'hours' ? { hoursReading, previousLastDoneHours: task.lastDoneHours ?? 0 } : {}),
+    loggedAt: new Date().toISOString(),
+    source: 'vessel-portal',
+  };
+
+  const submitBtn = document.getElementById('closeout-submit-btn');
+  submitBtn?.setAttribute('disabled', 'true');
+  try {
+    const updatedHistory = [logEntry, ...(task.history || [])];
+    const updates = { lastDone: date, nextDue: newNextDue, history: updatedHistory };
+    if (task.intervalType === 'hours') updates.lastDoneHours = hoursReading;
+    await window.FGDB.updateTask(task.id, updates);
+    await window.FGDB.addLog(logEntry);
+    closeModal('closeout-modal');
+    showToast(task.intervalType === 'hours'
+      ? `✓ Close-out recorded. Next due at ${(hoursReading + task.frequency).toLocaleString()} hrs.`
+      : `✓ Close-out recorded. Next due: ${formatDate(newNextDue)}`, 'success');
+  } catch (err) {
+    console.error('FleetGuard Portal: close-out failed', err);
+    showToast('Failed to save close-out. Check your connection and try again.', 'error');
+  } finally {
+    submitBtn?.removeAttribute('disabled');
+  }
+}
+
+// ── LOG RUNNING HOURS ────────────────────────────────────────
+function openLogHoursModal() {
+  const equipment = getVesselEquipment(portalVessel);
+  if (!equipment.length) { showToast('No equipment set up for this vessel yet — contact your office.', 'error'); return; }
+
+  document.getElementById('hours-form').reset();
+  document.getElementById('hours-date').value = TODAY.toISOString().split('T')[0];
+  document.getElementById('hours-signoff').value = portalVessel.chief || '';
+
+  document.getElementById('hours-fields-grid').innerHTML = equipment.map(f => {
+    const current = portalVessel.currentRunningHours?.[f.key] ?? 0;
+    return `
+      <div class="flex items-center gap-3">
+        <label class="w-32 shrink-0 text-xs text-gray-600 truncate" title="${f.label}">${f.label}</label>
+        <span class="text-xs text-gray-400 w-24 shrink-0 mono">was ${current.toLocaleString()}</span>
+        <input type="number" id="hours-input-${f.key}" data-current="${current}" data-abbr="${f.abbr || f.label}" min="${current}" step="1"
+          value="${current}" oninput="updateHoursRunSummary()" class="form-input flex-1 px-3 py-1.5 rounded-lg text-sm mono">
+      </div>`;
+  }).join('');
+  updateHoursRunSummary();
+  openModal('hours-modal');
+}
+function updateHoursRunSummary() {
+  const inputs = [...document.querySelectorAll('#hours-fields-grid input[id^="hours-input-"]')];
+  const lines = inputs.map(input => {
+    const current = parseFloat(input.dataset.current) || 0;
+    const next = parseFloat(input.value);
+    if (!Number.isFinite(next)) return null;
+    const run = next - current;
+    if (run === 0) return null;
+    return `${input.dataset.abbr} +${run.toLocaleString()} hrs`;
+  }).filter(Boolean);
+  document.getElementById('hours-run-summary').textContent = lines.length ? `Since last reading: ${lines.join(' · ')}` : 'No change from current readings yet.';
+}
+async function submitLogHours(e) {
+  e.preventDefault();
+  const equipment = getVesselEquipment(portalVessel);
+  const readingDate = document.getElementById('hours-date').value;
+  const signoff = document.getElementById('hours-signoff').value.trim();
+  if (!readingDate || !signoff) { showToast('Please complete all required fields.', 'error'); return; }
+
+  const readings = {}, runs = {};
+  for (const f of equipment) {
+    const input = document.getElementById(`hours-input-${f.key}`);
+    if (!input) continue;
+    const current = parseFloat(input.dataset.current) || 0;
+    const next = parseFloat(input.value);
+    if (!Number.isFinite(next) || next < 0) { showToast(`Enter a valid reading for ${f.label}.`, 'error'); return; }
+    if (next < current) { showToast(`${f.label} reading (${next}) can't be lower than the current value (${current}).`, 'error'); return; }
+    readings[f.key] = next;
+    runs[f.key] = +(next - current).toFixed(2);
+  }
+  if (Object.values(runs).every(r => r === 0)) {
+    if (!confirm('No hours changed since the last reading for any unit. Save anyway?')) return;
+  }
+
+  const logEntry = {
+    type: 'running-hours', vesselId: portalVessel.id, vesselName: portalVessel.name,
+    readingDate, signoff,
+    previousReadings: { ...portalVessel.currentRunningHours },
+    newReadings: readings, hoursRun: runs,
+    loggedAt: new Date().toISOString(), source: 'vessel-portal',
+  };
+  try {
+    await window.FGDB.updateVessel(portalVessel.id, { currentRunningHours: { ...portalVessel.currentRunningHours, ...readings } });
+    await window.FGDB.addLog(logEntry);
+    closeModal('hours-modal');
+    const totalRun = Object.values(runs).reduce((a, b) => a + b, 0);
+    showToast(`✓ Running hours updated (+${totalRun.toLocaleString()} hrs total).`, 'success');
+  } catch (err) {
+    console.error('FleetGuard Portal: log hours failed', err);
+    showToast('Failed to save running hours. Check your connection and try again.', 'error');
+  }
+}
+
+// ── TOAST ────────────────────────────────────────────────────
+function showToast(message, type = 'success') {
+  const el = document.createElement('div');
+  const styles = type === 'error' ? 'bg-red-600' : 'bg-gray-900';
+  el.className = `${styles} text-white text-sm px-4 py-2.5 rounded-lg shadow-lg max-w-xs`;
+  el.textContent = message;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// ── BOOT ─────────────────────────────────────────────────────
+window.addEventListener('fleetguard:db-ready', () => {
+  const params = new URLSearchParams(window.location.search);
+  const prefillId = params.get('id');
+  if (prefillId) document.getElementById('login-id').value = prefillId;
+
+  const session = loadSession();
+  if (session?.vesselId) startPortal(session.vesselId);
+});
+</script>
+</body>
+</html>
